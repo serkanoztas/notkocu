@@ -27,7 +27,8 @@
     "scheme": "notkocu",
     "platforms": [
       "ios",
-      "android"
+      "android",
+      "web"
     ]
   }
 }
