@@ -144,6 +144,21 @@ export interface WeekSummary {
   stale: boolean;
 }
 
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+}
+
+export type PublicUser = Pick<User, "_id" | "email" | "name" | "avatarUrl" | "timeZone">;
+
+export interface AuthResponse extends AuthTokens {
+  user: PublicUser;
+}
+
+export interface MeResponse {
+  user: PublicUser;
+}
+
 export interface HealthResponse {
   status: "ok";
   db: "connected" | "disconnected";

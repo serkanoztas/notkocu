@@ -4,3 +4,4 @@ export { CourseModel } from "./Course";
 export { SessionModel } from "./Session";
 export { NoteItemModel } from "./NoteItem";
 export { WeekSummaryModel } from "./WeekSummary";
+export { RefreshTokenModel } from "./RefreshToken";

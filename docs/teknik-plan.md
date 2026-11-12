@@ -29,7 +29,7 @@ Yığın tek bir Expo uygulaması ve onun konuştuğu bir Express API'den oluşu
 | Arayüz | NativeWind (Tailwind sınıfları) | Tailwind bilgisi doğrudan taşınır |
 | Sunucu verisi | TanStack Query | Önbellek, yeniden deneme, işleme durumunu sorgulama |
 | API | Node.js + Express | pyb-ai-analysis'teki controller / service yapısı |
-| Kimlik | Google ile giriş (`@react-native-google-signin`) + JWT | Sunucu Google token'ını doğrular, kendi access/refresh token'ını verir; token'lar `expo-secure-store`'da |
+| Kimlik | Google ile giriş (`@react-native-google-signin`) + JWT | Sunucu Google ID token'ını (audience = Web client ID) doğrular; access token JWT (15 dk), refresh token opak ve tek kullanımlık (30 gün, DB'de SHA-256 hash'i, rotasyon + yeniden kullanım tespiti); token'lar `expo-secure-store`'da |
 | Veritabanı | MongoDB Atlas + Mongoose | Atlas Vector Search ileride RAG için |
 | AI | Gemini (metin, görsel, ses) + Gemini embedding | Structured output ile JSON |
 | Dosya depolama | S3 uyumlu depolama (örn. Cloudflare R2) | İmzalı URL ile telefondan doğrudan yükleme |
@@ -38,16 +38,16 @@ Yığın tek bir Expo uygulaması ve onun konuştuğu bir Express API'den oluşu
 | PDF üretimi | PDFKit (sunucu) | pyb-ai-analysis'teki kod yeniden kullanılır |
 | Dağıtım | EAS Build + EAS Update | Mağaza derlemesi ve mağazaya uğramıyan hızlı güncelleme |
 
-**Expo Go ve dev build:** İlk aşamalar Expo Go ile test edilir (ilk test platformu Android, fiziksel cihaz). Expo Go'da çalışmayan parçalar dev build gerektirir ve ilgili aşamaya kadar eklenmez: `@react-native-google-signin`, `expo-share-intent`, Android'de uzaktan push (`expo-notifications`), arka plan ses kaydı.
+**Expo Go ve dev build:** İlk aşamalar Expo Go ile test edilir (ilk test platformu Android, fiziksel cihaz). Expo Go'da çalışmayan parçalar dev build gerektirir ve ilgili aşamaya kadar eklenmez: `@react-native-google-signin` (Google ile giriş; `app.json`'da Firebase'siz varyant, `iosUrlScheme` yer tutucudur, iOS aşamasında gerçek değerle değişir), `expo-share-intent`, Android'de uzaktan push (`expo-notifications`), arka plan ses kaydı.
 
 Web olmadığı için Vercel'e gerek kalmaz. API ve worker aynı sunucuda (Railway ya da Render) iki ayrı süreç olarak çalışır, Redis de aynı platformdan alınır.
 
 ## Veri modeli
 
-Model 6 koleksiyondan oluşur. Her kayıt `userId` taşır, yani kullanıcı verisi tamamen birbirinden ayrıdır. Tüm not tipleri tek bir `NoteItem` koleksiyonunda, `type` alanıyla ayrılır.
+Model 7 koleksiyondan oluşur (6 veri koleksiyonu + `RefreshToken`). Her kayıt `userId` taşır, yani kullanıcı verisi tamamen birbirinden ayrıdır. Tüm not tipleri tek bir `NoteItem` koleksiyonunda, `type` alanıyla ayrılır.
 
 ```js
-User        { _id, email, name, avatarUrl, timeZone: "Europe/Istanbul", pushTokens[], createdAt }
+User        { _id, googleId, email, name, avatarUrl, timeZone: "Europe/Istanbul", pushTokens[], createdAt }
 
 Semester    { _id, userId, name: "2026 Güz", startDate, weekCount: 14,
               weekStatuses: [{ weekNo, status: "normal"|"holiday"|"midterm"|"final" }],
@@ -70,6 +70,8 @@ NoteItem    { _id, userId,
 
 WeekSummary { _id, userId, courseId, weekNo, summary,
               noteIds[], generatedAt, stale }
+
+RefreshToken { _id, userId, tokenHash, familyId, expiresAt (TTL), usedAt?, createdAt }
 ```
 
 Tipe özel `content` alanları:
@@ -152,7 +154,7 @@ MVP 9 ekrandan oluşur ve hepsinin tıklanabilir mockup'ı hazır: [NotKoçu mob
 
 | Ekran | Grup | İçerik |
 | --- | --- | --- |
-| Giriş | İlk kurulum | Google veya e-posta ile giriş |
+| Giriş | İlk kurulum | Google ile giriş (MVP'de e-posta yok) |
 | Program yükle | İlk kurulum | Dönem adı, başlangıç tarihi, hafta sayısı; ekran görüntüsü/PDF yükleme ve okuma adımları |
 | Program onayı | İlk kurulum | Haftalık takvim, emin olunamayan dersin düzeltilmesi |
 | Bugün | Ana gezinme | Devam eden ders kartı, sonraki dersler, haftanın görevleri, gelen kutusu uyarısı |
@@ -168,12 +170,14 @@ MVP 9 ekrandan oluşur ve hepsinin tıklanabilir mockup'ı hazır: [NotKoçu mob
 
 ## API endpoint'leri
 
-API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. Kimlik uçları dışındaki tüm uçlar `Authorization: Bearer` gerektirir ve sorguları `userId` ile sınırlar.
+API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. `/api/health` ve `/api/auth/*` dışındaki tüm uçlar `Authorization: Bearer` gerektirir ve sorguları `userId` ile sınırlar.
 
 | Metot | Yol | Ne yapar |
 | --- | --- | --- |
 | POST | `/api/auth/google` | Google ID token'ını doğrular, access + refresh token döner |
-| POST | `/api/auth/refresh` | Access token'ı yeniler |
+| POST | `/api/auth/refresh` | Refresh token'ı döndürür (rotasyon): yeni access + refresh token; kullanılmış token tekrar gelirse tüm aile iptal olur |
+| POST | `/api/auth/logout` | Gönderilen refresh token'ın ailesini iptal eder (204) |
+| GET | `/api/me` | Giriş yapan kullanıcının bilgisi |
 | DELETE | `/api/me` | Hesabı ve tüm verisini siler |
 | POST | `/api/schedule/parse` | Program görselini okur, JSON döner (kayıt yok) |
 | POST | `/api/schedule/confirm` | Dönem, ders ve oturumları oluşturur |
@@ -232,6 +236,8 @@ Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomati
 
 **Karar bekleyen sorular:**
 
+- [ ] preview/production build aşamasında `EXPO_PUBLIC_API_URL` ve `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` EAS ortam değişkeni (`eas env:create`) olarak tanımlanacak; dev build'de Metro yerel `.env`'den okur.
+- [ ] Play Store öncesi: Play App Signing SHA-1'i için ikinci Android OAuth client; Ayarlar'a "Hesabı sil" butonu.
 - [ ] API ve worker için Railway mi Render mı kullanılacak?
 - [ ] Dosya depolama: Cloudflare R2 mi, MongoDB GridFS mi?
 - [x] İlk test hangi platformda yapılacak: Android, fiziksel cihaz, Expo Go (dev build native modül gereken aşamada)

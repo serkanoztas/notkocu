@@ -16,6 +16,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { AuthProvider, useAuth } from "../src/lib/auth";
 import { queryClient } from "../src/lib/queryClient";
 
 SplashScreen.preventAutoHideAsync();
@@ -29,21 +30,41 @@ export default function RootLayout() {
     Inter_600SemiBold,
   });
 
-  useEffect(() => {
-    if (loaded || error) SplashScreen.hideAsync();
-  }, [loaded, error]);
+  const fontsReady = loaded || !!error;
 
-  if (!loaded && !error) return null;
+  if (!fontsReady) return null;
 
   return (
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
-        <StatusBar style="dark" />
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F6F6F3" } }}>
-          <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="capture" options={{ presentation: "modal" }} />
-        </Stack>
+        <AuthProvider>
+          <StatusBar style="dark" />
+          <RootStack />
+        </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>
+  );
+}
+
+function RootStack() {
+  const { status } = useAuth();
+
+  useEffect(() => {
+    if (status !== "loading") SplashScreen.hideAsync();
+  }, [status]);
+
+  if (status === "loading") return null;
+  const signedIn = status === "signedIn";
+
+  return (
+    <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F6F6F3" } }}>
+      <Stack.Protected guard={signedIn}>
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="capture" options={{ presentation: "modal" }} />
+      </Stack.Protected>
+      <Stack.Protected guard={!signedIn}>
+        <Stack.Screen name="login" />
+      </Stack.Protected>
+    </Stack>
   );
 }
