@@ -38,6 +38,17 @@
       "ios",
       "android",
       "web"
-    ]
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "ad58a8b6-0fd2-4460-95d5-8dc7f8428839"
+      }
+    },
+    "owner": "serkanoztas"
   }
 }
