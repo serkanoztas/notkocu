@@ -220,6 +220,15 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 
 &#91;embedded content: MVP yol haritası · 6 aşama\]
 
+**İlerleme:**
+
+- [x] Aşama 1: İskelet, Google ile giriş ve JWT kimlik doğrulama (Android fiziksel cihazda doğrulandı)
+
+**Kurulum notları (Google girişi):**
+
+- `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` (mobil) ve `GOOGLE_WEB_CLIENT_ID` (API) aynı **Web application** client ID'sidir.
+- Android client ID hiçbir `.env`'e yazılmaz. Android OAuth client yalnızca Google Cloud'da paket adı ve SHA-1 ile tanımlanır, uygulama kodu onu kullanmaz. Yanlışlıkla `.env`'e yazılırsa giriş sessizce başarısız olur ve API'ye istek gitmez.
+
 Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomatik atama ve hafta yapısı ona bağlı. Ses, en pahalı ve en riskli tip olduğu için sona bırakıldı. MVP sonrası için aday özellikler: ders içinde RAG ile soru sorma, quiz ve flashcard üretimi, görsel kart olarak dışa aktarma.
 
 ## Açık sorular ve riskler

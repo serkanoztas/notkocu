@@ -72,17 +72,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setStatus("signedIn");
       return null;
     } catch (err) {
+      const e = err as { code?: unknown; message?: unknown } | null;
+      const debug = `[${String(e?.code ?? "no-code")}] ${String(e?.message ?? err)}`;
+      if (__DEV__) console.error("Google sign-in failed:", debug);
+      const withDebug = (msg: string) => (__DEV__ ? `${msg}\n${debug}` : msg);
       if (isErrorWithCode(err)) {
         if (err.code === statusCodes.SIGN_IN_CANCELLED || err.code === statusCodes.IN_PROGRESS) return null;
         if (err.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
-          return "Google Play Hizmetleri bulunamadı ya da güncel değil.";
+          return withDebug("Google Play Hizmetleri bulunamadı ya da güncel değil.");
         }
-        return "Google ile giriş yapılamadı. Tekrar dene.";
+        return withDebug("Google ile giriş yapılamadı. Tekrar dene.");
       }
       if (err instanceof ApiError) {
-        return err.status === 401 ? "Google hesabı doğrulanamadı." : err.message;
+        return withDebug(err.status === 401 ? "Google hesabı doğrulanamadı." : err.message);
       }
-      return "Giriş yapılamadı. Tekrar dene.";
+      return withDebug("Giriş yapılamadı. Tekrar dene.");
     }
   }, []);
 
