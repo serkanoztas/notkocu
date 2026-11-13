@@ -96,7 +96,12 @@ Yeni not eklendiğinde ilgili `WeekSummary.stale = true` olur. Özet bir sonraki
 
 Her not, tipi ne olursa olsun aynı hattan geçer ve sonunda `extractedText` alanına düz metin olarak yazılır. Haftalık özet, gelen kutusu önerisi ve ileride kurulacak RAG sohbeti tipe bakmadan yalnızca bu alanı okur.
 
-&#91;embedded content: Not işleme hattı · 6 adım\]
+1. **Not oluşturulur:** dosya depoya yüklenir, `status: pending`
+2. **Otomatik atama:** ders saatindeyse o haftaya, değilse gelen kutusuna
+3. **Kuyruğa eklenir:** worker işi alır, `status: processing`
+4. **Tipe göre işleme:** OCR, transkript, metin çıkarma (Gemini)
+5. **Sonuç kaydedilir:** `extractedText` + `aiSummary`, `status: ready`
+6. **Sonraki adımlar:** gelen kutusunda ders önerisi, haftalık özet yenilenir, push bildirimi gider
 
 Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, arka planda işlenir. Başarısız iş 3 kez yeniden denenir, sonra `failed` olur ve not detayında "Tekrar dene" butonu çıkar.
 
@@ -218,11 +223,12 @@ Uygulama içinde paylaşım sistemi kurulmaz. Dışarıyla alışveriş tamamen 
 
 MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak önerildi. Her aşama kendi başına çalışan bir parça bırakır, böylece plan herhangi bir noktada kesilse bile elde kullanılabilir bir ürün kalır.
 
-&#91;embedded content: MVP yol haritası · 6 aşama\]
-
-**İlerleme:**
-
-- [x] Aşama 1: İskelet, Google ile giriş ve JWT kimlik doğrulama (Android fiziksel cihazda doğrulandı)
+1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
+2. [ ] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
+3. [ ] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
+4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi
+5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
+6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test
 
 **Kurulum notları (Google girişi):**
 
