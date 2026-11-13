@@ -22,7 +22,6 @@ const isTime = (v: string) => {
 
 /** Returns a Turkish message for the first problem, or null when the course can be saved. */
 export function validateCourse(c: ScheduleCourseDraft): string | null {
-  if (!c.code.trim()) return "Ders kodu gerekli";
   if (!c.name.trim()) return "Ders adı gerekli";
   if (c.sessions.length === 0) return "En az bir ders saati ekle";
   for (const s of c.sessions) {
@@ -107,7 +106,7 @@ export function CourseEditor({ visible, title, initial, onSave, onDelete, onClos
           <Text className="font-heading text-3xl text-ink">{title}</Text>
           <View className="flex-row gap-3">
             <View className="flex-1">
-              <Field label="Ders kodu">
+              <Field label="Ders kodu (ops.)">
                 <TextInput
                   className={inputClass}
                   value={course.code}

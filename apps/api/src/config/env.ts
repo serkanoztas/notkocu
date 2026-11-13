@@ -11,6 +11,8 @@ const schema = z.object({
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
   // No default on purpose: check the current model names in the Gemini docs.
   GEMINI_MODEL: z.string().min(1, "GEMINI_MODEL is required"),
+  // gemini-3.8-flash does not support MINIMAL; use LOW there.
+  GEMINI_THINKING_LEVEL: z.enum(["MINIMAL", "LOW"]).default("MINIMAL"),
 });
 
 const parsed = schema.safeParse(process.env);

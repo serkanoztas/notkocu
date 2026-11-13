@@ -1,4 +1,4 @@
-import { Type, type Schema } from "@google/genai";
+import { ThinkingLevel, Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import {
   DAY_CODES,
@@ -10,7 +10,7 @@ import {
   type ScheduleTimeSlot,
 } from "@notkocu/shared";
 import { AppError } from "../../utils/AppError";
-import { geminiModel, getGemini } from "./gemini";
+import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
 
 const KINDS = ["teori", "lab", "uygulama"] as const;
 
@@ -76,7 +76,8 @@ const rawZ = z.object({
       code: z.string(),
       name: z.string(),
       instructor: z.string().optional().default(""),
-      confidence: z.number(),
+      // Only Gemini decides confidence; we just keep it inside 0..1.
+      confidence: z.number().transform((n) => Math.min(1, Math.max(0, n))),
       sessions: z.array(
         slotZ.extend({
           room: z.string().optional().default(""),
@@ -109,14 +110,11 @@ function toSlot(raw: z.infer<typeof slotZ>): ScheduleTimeSlot | null {
 function normalize(raw: z.infer<typeof rawZ>): ParseScheduleResponse {
   const courses: ScheduleCourseDraft[] = [];
   for (const c of raw.courses) {
-    let confidence = Math.min(1, Math.max(0, c.confidence));
+    const confidence = c.confidence;
     const sessions: ScheduleSessionDraft[] = [];
     for (const s of c.sessions) {
       const slot = toSlot(s);
-      if (!slot) {
-        confidence = Math.min(confidence, 0.5); // unreadable session dropped: needs review
-        continue;
-      }
+      if (!slot) continue; // unusable day/time: drop the session
       const alternatives = s.alternatives
         .map(toSlot)
         .filter((a): a is ScheduleTimeSlot => a !== null);
@@ -130,7 +128,6 @@ function normalize(raw: z.infer<typeof rawZ>): ParseScheduleResponse {
     const code = c.code.trim();
     const name = c.name.trim();
     if (!code && !name && sessions.length === 0) continue;
-    if (!code || sessions.length === 0) confidence = Math.min(confidence, 0.5);
     courses.push({
       code,
       name,
@@ -181,6 +178,8 @@ export async function parseScheduleImage(
           responseMimeType: "application/json",
           responseSchema,
           temperature: 0,
+          // Reading a table needs no reasoning; thinking only adds latency.
+          thinkingConfig: { thinkingLevel: ThinkingLevel[geminiThinkingLevel()] },
         },
       });
       text = res.text;

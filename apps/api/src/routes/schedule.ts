@@ -82,7 +82,7 @@ const confirmBody = z.object({
   courses: z
     .array(
       z.object({
-        code: z.string().trim().min(1).max(20),
+        code: z.string().trim().max(20).default(""),
         name: z.string().trim().min(1).max(120),
         instructor: z.string().trim().max(120).optional(),
         sessions: z

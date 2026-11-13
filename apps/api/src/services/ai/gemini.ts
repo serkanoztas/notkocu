@@ -10,3 +10,4 @@ export function getGemini(): GoogleGenAI {
 }
 
 export const geminiModel = (): string => env.GEMINI_MODEL;
+export const geminiThinkingLevel = () => env.GEMINI_THINKING_LEVEL;
