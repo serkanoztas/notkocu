@@ -159,6 +159,53 @@ export interface MeResponse {
   user: PublicUser;
 }
 
+// --- Schedule import ---
+
+export interface ScheduleTimeSlot {
+  day: number;
+  start: string;
+  end: string;
+}
+
+export interface ScheduleSessionDraft extends ScheduleTimeSlot {
+  room?: string;
+  kind: SessionKind;
+  /** Other plausible slots when the time was hard to read. */
+  alternatives?: ScheduleTimeSlot[];
+}
+
+export interface ScheduleCourseDraft {
+  code: string;
+  name: string;
+  instructor?: string;
+  sessions: ScheduleSessionDraft[];
+  /** 0..1; < 0.8 is shown as "needs review". */
+  confidence: number;
+}
+
+export interface ParseScheduleResponse {
+  courses: ScheduleCourseDraft[];
+}
+
+export interface ConfirmScheduleRequest {
+  semester: { name: string; startDate: string; weekCount: number };
+  courses: {
+    code: string;
+    name: string;
+    instructor?: string;
+    sessions: { day: number; start: string; end: string; room?: string; kind: SessionKind }[];
+  }[];
+  /** Deactivate the current active semester instead of answering 409. */
+  replaceActive?: boolean;
+}
+
+export type CourseWithSessions = Course & { sessions: Session[] };
+
+export interface ActiveSemesterResponse {
+  semester: Semester | null;
+  courses: CourseWithSessions[];
+}
+
 export interface HealthResponse {
   status: "ok";
   db: "connected" | "disconnected";

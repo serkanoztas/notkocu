@@ -16,8 +16,10 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { useActiveSemester } from "../src/hooks/useActiveSemester";
 import { AuthProvider, useAuth } from "../src/lib/auth";
 import { queryClient } from "../src/lib/queryClient";
+import { ScheduleDraftProvider } from "../src/lib/scheduleDraft";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -38,8 +40,10 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
-          <StatusBar style="dark" />
-          <RootStack />
+          <ScheduleDraftProvider>
+            <StatusBar style="dark" />
+            <RootStack />
+          </ScheduleDraftProvider>
         </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>
@@ -48,19 +52,29 @@ export default function RootLayout() {
 
 function RootStack() {
   const { status } = useAuth();
+  const signedIn = status === "signedIn";
+  const semester = useActiveSemester(signedIn);
+
+  // Onboarding only when the request succeeded and there is no active semester.
+  // Network errors / 5xx keep the tabs open (the Today screen offers a retry).
+  const needsOnboarding = semester.isSuccess && semester.data.semester === null;
+  const ready = status !== "loading" && (!signedIn || !semester.isPending);
 
   useEffect(() => {
-    if (status !== "loading") SplashScreen.hideAsync();
-  }, [status]);
+    if (ready) SplashScreen.hideAsync();
+  }, [ready]);
 
-  if (status === "loading") return null;
-  const signedIn = status === "signedIn";
+  if (!ready) return null;
 
   return (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F6F6F3" } }}>
-      <Stack.Protected guard={signedIn}>
+      <Stack.Protected guard={signedIn && !needsOnboarding}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="capture" options={{ presentation: "modal" }} />
+      </Stack.Protected>
+      <Stack.Protected guard={signedIn && needsOnboarding}>
+        <Stack.Screen name="onboarding/schedule" />
+        <Stack.Screen name="onboarding/confirm" />
       </Stack.Protected>
       <Stack.Protected guard={!signedIn}>
         <Stack.Screen name="login" />

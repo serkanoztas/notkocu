@@ -26,6 +26,13 @@
       "expo-status-bar",
       "expo-secure-store",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Ders programı görselini seçebilmek için fotoğraflarına erişim gerekir.",
+          "cameraPermission": "Ders programının fotoğrafını çekebilmek için kamera erişimi gerekir."
+        }
+      ],
+      [
         "@react-native-google-signin/google-signin",
         {
           "iosUrlScheme": "com.googleusercontent.apps.notkocu-ios-placeholder"

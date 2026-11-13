@@ -18,5 +18,7 @@ const semesterSchema = new Schema({
 });
 
 semesterSchema.index({ userId: 1, isActive: 1 });
+// At most one active semester per user, even under concurrent confirms.
+semesterSchema.index({ userId: 1 }, { unique: true, partialFilterExpression: { isActive: true } });
 
 export const SemesterModel = model("Semester", semesterSchema);

@@ -1,10 +1,17 @@
-import type { AuthResponse, HealthResponse, MeResponse } from "@notkocu/shared";
+import type {
+  ActiveSemesterResponse,
+  AuthResponse,
+  ConfirmScheduleRequest,
+  HealthResponse,
+  MeResponse,
+  ParseScheduleResponse,
+} from "@notkocu/shared";
 import { tokenStore } from "./tokenStore";
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
 
 export class ApiError extends Error {
-  constructor(message: string, public status?: number) {
+  constructor(message: string, public status?: number, public code?: string) {
     super(message);
     this.name = "ApiError";
   }
@@ -19,6 +26,8 @@ export function setAuthLostHandler(handler: (() => void) | null) {
 interface Options {
   method?: string;
   body?: unknown;
+  /** Multipart body; fetch sets the Content-Type boundary itself. */
+  form?: FormData;
   /** Send the access token and refresh once on 401. Default true. */
   auth?: boolean;
   timeoutMs?: number;
@@ -32,10 +41,10 @@ async function send(path: string, opts: Options, accessToken: string | null): Pr
     return await fetch(`${BASE_URL}${path}`, {
       method: opts.method ?? "GET",
       headers: {
-        ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(opts.body !== undefined && !opts.form ? { "Content-Type": "application/json" } : {}),
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
       signal: controller.signal,
     });
   } catch {
@@ -81,7 +90,13 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
       throw new ApiError("Oturum süresi doldu", 401);
     }
   }
-  if (!res.ok) throw new ApiError(`Sunucu hatası (${res.status})`, res.status);
+  if (!res.ok) {
+    const code = await res
+      .json()
+      .then((b: { error?: { code?: string } }) => b?.error?.code)
+      .catch(() => undefined);
+    throw new ApiError(`Sunucu hatası (${res.status})`, res.status, code);
+  }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
@@ -91,6 +106,15 @@ export const api = {
   me: () => request<MeResponse>("/api/me"),
   loginWithGoogle: (idToken: string) =>
     request<AuthResponse>("/api/auth/google", { method: "POST", body: { idToken }, auth: false, timeoutMs: 15000 }),
+  activeSemester: () => request<ActiveSemesterResponse>("/api/semesters/active"),
+  parseSchedule: (image: { uri: string; name: string; type: string }) => {
+    const form = new FormData();
+    // React Native's FormData accepts a { uri, name, type } descriptor in place of a Blob.
+    form.append("image", image as unknown as Blob);
+    return request<ParseScheduleResponse>("/api/schedule/parse", { method: "POST", form, timeoutMs: 60000 });
+  },
+  confirmSchedule: (body: ConfirmScheduleRequest) =>
+    request<ActiveSemesterResponse>("/api/schedule/confirm", { method: "POST", body, timeoutMs: 15000 }),
   logout: (refreshToken: string) =>
     request<void>("/api/auth/logout", { method: "POST", body: { refreshToken }, auth: false }),
 };

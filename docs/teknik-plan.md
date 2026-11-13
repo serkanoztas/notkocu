@@ -144,6 +144,17 @@ Kullanıcı OBS'den aldığı ders programı ekran görüntüsünü ya da PDF'in
 3. Onay ekranında program haftalık takvim olarak gösterilir. `confidence < 0.8` olan dersler sarı ve kesikli çizgiyle işaretlenir; kullanıcı bunları seçeneklerle ya da elle düzeltir.
 4. `POST /api/schedule/confirm` tek işlemde `Semester`, `Course` ve `Session` kayıtlarını oluşturur. Haftalar kayıt olarak tutulmaz; `startDate` ve `weekCount`'tan hesaplanır.
 
+**Aşama 2'de uygulanan sapmalar:**
+
+- Görsel depolamaya yüklenmez; multipart olarak `POST /api/schedule/parse`'a gider (en fazla 8 MB, jpeg/png/webp/heic), sunucu saklamaz, yalnızca Gemini'ye iletir. Kullanıcı başına dakikada 5 istek.
+- PDF bu aşamada desteklenmez, yalnızca görsel (PDF sonraya kaldı).
+- Oturumlara opsiyonel `alternatives: [{day,start,end}]` eklendi: saat iki şekilde okunabiliyorsa onay ekranı "hangisi doğru?" çipleri gösterir. `parse` yanıtında `day` sayıdır (0=Pazartesi); gün kodu çevirisi sunucuda `dayCodeToIndex` ile yapılır.
+- Gemini cevabı şemaya uymazsa ya da boşsa bir kez yeniden denenir; yine olmazsa 422 `SCHEDULE_UNREADABLE`, mobilde "Program okunamadı" + "Elle gireceğim".
+- `POST /api/schedule/confirm`: aktif dönem varsa 409 `ACTIVE_SEMESTER_EXISTS`; `replaceActive: true` ile eski dönem silinmez, `isActive=false` olur. `startDate` Pazartesi olmak zorundadır (aksi 400) ve öğlen 12:00 UTC olarak saklanır (her saat diliminde aynı takvim günü). Kullanıcı başına tek aktif dönem, kısmi benzersiz indeksle garanti edilir. Transaction replica set ister (Atlas'ta sorun yok).
+- `GET /api/semesters/active`: aktif dönem + dersler + oturumlar; mobil yalnızca bu istek başarılı dönüp `semester === null` ise onboarding'e yönlendirir, ağ hatası/5xx'te sekmeler açılır ve Bugün ekranında "Program yüklenemedi" + "Tekrar dene" gösterilir.
+- Mobilde tarih `GG.AA.YYYY` girilir, API'ye `YYYY-MM-DD` gider; Pazartesi değilse en yakın Pazartesi önerilir. Görsel kırpma `expo-image-picker`'ın `allowsEditing` seçeneğiyle yapılır (`expo-image-manipulator` eklenmedi).
+- Model adı `GEMINI_MODEL` env'inden gelir. `apps/api` içinde `npm run try-parse -- <görsel>` ile komut satırından denenebilir.
+
 **Prompt'ta açıkça belirtilecek kurallar:**
 
 - Bitişik saat hücrelerindeki aynı ders tek oturum sayılır.
@@ -186,6 +197,7 @@ API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. `/api/health` ve 
 | DELETE | `/api/me` | Hesabı ve tüm verisini siler |
 | POST | `/api/schedule/parse` | Program görselini okur, JSON döner (kayıt yok) |
 | POST | `/api/schedule/confirm` | Dönem, ders ve oturumları oluşturur |
+| GET | `/api/semesters/active` | Aktif dönem, dersleri ve oturumları (yoksa `semester: null`) |
 | GET | `/api/today` | Bugünün dersleri, devam eden ders, haftanın görevleri, gelen kutusu sayısı |
 | GET | `/api/courses` | Aktif dönemin dersleri ve oturumları |
 | GET | `/api/courses/:id` | Ders detayı ve hafta başına not sayıları |
