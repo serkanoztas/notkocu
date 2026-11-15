@@ -16,6 +16,9 @@ type Picked = { uri: string; name: string; type: string };
 
 function readErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.code === "TIMEOUT") return "İstek zaman aşımına uğradı, tekrar dene";
+    if (err.code === "NETWORK") return "Ağ hatası: sunucuya bağlanılamadı, bağlantını kontrol et";
+    if (err.status && err.status >= 500) return "Sunucu hatası, biraz sonra tekrar dene";
     if (err.code === "SCHEDULE_UNREADABLE") return "Program okunamadı";
     if (err.status === 413) return "Görsel çok büyük (en fazla 8 MB)";
     if (err.status === 429) return "Çok fazla deneme yaptın, biraz bekleyip tekrar dene";

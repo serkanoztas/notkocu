@@ -10,6 +10,21 @@ import { semestersRouter } from "./routes/semesters";
 export function createApp() {
   const app = express();
   app.use(cors());
+
+  // Dev-only request log: method, path, status, duration. Never bodies, headers or query strings.
+  if (process.env.NODE_ENV !== "production") {
+    app.use((req, res, next) => {
+      const start = Date.now();
+      const path = req.originalUrl.split("?")[0];
+      console.log(`→ ${req.method} ${path}`);
+      res.on("close", () => {
+        const aborted = !res.writableFinished ? " (connection closed before response)" : "";
+        console.log(`← ${req.method} ${path} ${res.statusCode} ${Date.now() - start}ms${aborted}`);
+      });
+      next();
+    });
+  }
+
   app.use(express.json({ limit: "1mb" }));
 
   // Public: health and auth. Every other router must be mounted behind requireAuth.

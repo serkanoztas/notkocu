@@ -36,7 +36,11 @@ interface Options {
 async function send(path: string, opts: Options, accessToken: string | null): Promise<Response> {
   if (!BASE_URL) throw new ApiError("EXPO_PUBLIC_API_URL tanımlı değil");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 5000);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, opts.timeoutMs ?? 5000);
   try {
     return await fetch(`${BASE_URL}${path}`, {
       method: opts.method ?? "GET",
@@ -47,8 +51,10 @@ async function send(path: string, opts: Options, accessToken: string | null): Pr
       body: opts.form ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined),
       signal: controller.signal,
     });
-  } catch {
-    throw new ApiError("API'ye ulaşılamıyor");
+  } catch (err) {
+    if (__DEV__) console.warn(`[api] ${opts.method ?? "GET"} ${path} failed (timedOut=${timedOut}):`, err);
+    if (timedOut) throw new ApiError("İstek zaman aşımına uğradı", undefined, "TIMEOUT");
+    throw new ApiError("Ağ hatası: sunucuya bağlanılamadı", undefined, "NETWORK");
   } finally {
     clearTimeout(timer);
   }
