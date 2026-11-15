@@ -10,7 +10,8 @@ import {
   SpaceGrotesk_700Bold,
   useFonts,
 } from "@expo-google-fonts/space-grotesk";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
+import Constants from "expo-constants";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
@@ -18,10 +19,22 @@ import { useEffect, useRef } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useActiveSemester } from "../src/hooks/useActiveSemester";
 import { AuthProvider, useAuth } from "../src/lib/auth";
-import { queryClient } from "../src/lib/queryClient";
+import { CACHE_MAX_AGE_MS, queryClient } from "../src/lib/queryClient";
+import { queryPersister } from "../src/lib/queryPersister";
 import { ScheduleDraftProvider, useScheduleDraft } from "../src/lib/scheduleDraft";
 
 SplashScreen.preventAutoHideAsync();
+
+// A new app version drops the old cache (shapes may have changed). Only successful, non-debug queries are saved.
+const persistOptions = {
+  persister: queryPersister,
+  maxAge: CACHE_MAX_AGE_MS,
+  buster: Constants.expoConfig?.version ?? "0",
+  dehydrateOptions: {
+    shouldDehydrateQuery: (q: { state: { status: string }; queryKey: readonly unknown[] }) =>
+      q.state.status === "success" && q.queryKey[0] !== "health",
+  },
+};
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -38,14 +51,14 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <QueryClientProvider client={queryClient}>
+      <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
         <AuthProvider>
           <ScheduleDraftProvider>
             <StatusBar style="dark" />
             <RootStack />
           </ScheduleDraftProvider>
         </AuthProvider>
-      </QueryClientProvider>
+      </PersistQueryClientProvider>
     </SafeAreaProvider>
   );
 }

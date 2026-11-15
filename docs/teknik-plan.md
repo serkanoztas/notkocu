@@ -181,6 +181,16 @@ MVP 9 ekrandan oluşur ve hepsinin tıklanabilir mockup'ı hazır: [NotKoçu mob
 | Hızlı yakalama | Not girişi | Kaydedileceği yer, 6 not tipi, tipe göre giriş alanı |
 | Gelen kutusu | Not girişi | AI ders önerisi, onayla/değiştir, emin değilse ders seçimi |
 
+**Aşama 3'te uygulanan sapmalar:**
+
+- Otomatik atama ve "şu an / sonraki ders" kuralı `packages/shared/src/assignment.ts` içindedir (`resolveAutoTarget`, `sessionState`, `semesterWeekNo`; yalnızca `time.ts` üzerine kurulu). API ve mobil aynı kodu kullanır. Pencereler çakışırsa saate en yakın oturum kazanır (devam eden, bitmiş ya da başlamamış olandan önce gelir; eşitlikte erken başlayan). Hafta 1..`weekCount` dışındaysa not gelen kutusuna düşer.
+- Mobil, "Kaydedileceği yer" ve devam eden/sonraki ders hesaplarını önbellekteki aktif dönemden ve `User.timeZone`'dan yapar (cihaz saat dilimi kullanılmaz), böylece çevrimdışıyken de çalışır ve sunucuyla aynı sonucu verir. Otomatik hedef capture açılışında sabitlenmez: Kaydet anında yeniden hesaplanır, ekranda açıkken dakikada bir güncellenir. Elle seçilen ya da Bugün'deki "Not al" ile gelen hedef sabit kalır.
+- `POST /api/notes` gövdesinde `courseId` yoksa sunucu otomatik atar; `null` gelen kutusu, bir id ise elle atama (`weekNo` zorunlu, ders kullanıcıya ait ve hafta `weekCount` içinde olmalı). Mobil hedefi her zaman açıkça gönderir. Başkasına ait ya da geçersiz id her yerde 404 döner.
+- `GET /api/courses` (liste) yazılmadı: Dersler sekmesi `GET /api/semesters/active` verisini kullanır. `GET /api/today` yalnızca sunucu tarafı özettir (bugünün oturumları, devam eden dersin bu haftaki not sayısı, gelen kutusu sayısı, `tasks: []`); mobil devam eden/sonraki dersleri kendisi hesaplar.
+- Ders sayfasında arama kutusu, Hafta sayfasında "Tipe göre / Zaman çizelgesi" sekmesi ve paylaş butonu yok (tek not tipi var). AI özeti alanı "Özet 5. aşamada" yer tutucusudur. Markdown düz metin olarak gösterilir.
+- Hızlı yakalamada yalnızca Metin aktiftir; diğer 5 tip "yakında" ve pasif. Çevrimdışıyken not kaydedilemez ("Bağlantı yok, not kaydedilemedi"); çevrimdışı not kuyruğu Aşama 4'tedir.
+- Çevrimdışı önbellek: TanStack Query önbelleği `expo-file-system` `File` ile `Paths.document/query-cache.json` dosyasına yazılır (`@tanstack/react-query-persist-client`, saf JS; native paket yok). 7 gün geçerli, uygulama sürümü değişince silinir, çıkışta/oturum kaybında diskten de silinir.
+
 **Otomatik atama kuralı:** Not oluşturulduğunda sunucu, kullanıcının `Session` kayıtlarına bakar. Şu anki gün ve saat bir oturumun **başlangıcından 10 dk önce ile bitişinden 30 dk sonra** arasındaysa not o derse ve o haftaya atanır. Eşleşme yoksa not gelen kutusuna düşer. Hafta numarası `floor((bugün − startDate) / 7) + 1` ile hesaplanır.
 
 **Gelen kutusunda AI önerisi:** Not işlenip `extractedText` çıktıktan sonra Gemini'ye kullanıcının ders listesi ve bu metin verilir. Model `{ courseId, weekNo, confidence }` döner. `confidence < 0.7` ise öneri gösterilmez, kullanıcıdan ders seçmesi istenir.
@@ -239,7 +249,7 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
 2. [x] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
 3. [ ] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
-4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi
+4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi; çevrimdışı not kuyruğu: not önce cihaza kaydedilir, bağlantı gelince gönderilir
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test
 

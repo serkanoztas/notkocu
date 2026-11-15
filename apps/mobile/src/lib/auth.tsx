@@ -8,6 +8,7 @@ import type { PublicUser } from "@notkocu/shared";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, ApiError, setAuthLostHandler } from "./api";
 import { queryClient } from "./queryClient";
+import { clearPersistedCache } from "./queryPersister";
 import { tokenStore } from "./tokenStore";
 
 type Status = "loading" | "signedOut" | "signedIn";
@@ -28,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const reset = useCallback(() => {
     queryClient.clear();
+    void clearPersistedCache(); // the next account must never see this one's cached notes
     setUser(null);
     setStatus("signedOut");
   }, []);
