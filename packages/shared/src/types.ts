@@ -211,3 +211,69 @@ export interface HealthResponse {
   db: "connected" | "disconnected";
   time: ISODate;
 }
+
+// --- Notes, today, courses (stage 3) ---
+
+export type SessionState = "upcoming" | "ongoing" | "done";
+
+export interface CreateNoteRequest {
+  type: "text";
+  title?: string;
+  markdown: string;
+  /** Omitted = the server auto-assigns by the current time; null = inbox; an id = manual (weekNo required). */
+  courseId?: Id | null;
+  weekNo?: number;
+}
+
+export interface UpdateNoteRequest {
+  title?: string;
+  markdown?: string;
+  /** null moves the note back to the inbox; an id requires weekNo. */
+  courseId?: Id | null;
+  weekNo?: number;
+}
+
+export interface NoteResponse {
+  note: NoteItem;
+}
+
+export interface InboxResponse {
+  notes: NoteItem[];
+  count: number;
+}
+
+export type CourseRef = Pick<Course, "_id" | "code" | "name" | "color">;
+
+export interface TodaySessionItem {
+  session: Session;
+  course: CourseRef;
+  state: SessionState;
+}
+
+export interface TodayResponse {
+  semester: Pick<Semester, "_id" | "name" | "startDate" | "weekCount"> | null;
+  /** Current semester week, null outside the semester. */
+  weekNo: number | null;
+  sessions: TodaySessionItem[];
+  /** The session in progress right now, with the course's note count for this week. */
+  ongoing: (TodaySessionItem & { weekNoteCount: number }) | null;
+  /** Tasks of this week; always empty until the task type exists. */
+  tasks: NoteItem[];
+  inboxCount: number;
+}
+
+export interface CourseDetailResponse {
+  course: Course;
+  sessions: Session[];
+  semester: Pick<Semester, "_id" | "name" | "startDate" | "weekCount" | "weekStatuses">;
+  currentWeekNo: number | null;
+  weekNoteCounts: { weekNo: number; count: number }[];
+}
+
+export interface WeekResponse {
+  course: Course;
+  weekNo: number;
+  notes: NoteItem[];
+  /** AI summary; null until stage 5. */
+  summary: WeekSummary | null;
+}

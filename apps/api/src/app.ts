@@ -2,10 +2,14 @@ import cors from "cors";
 import express from "express";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { authRouter } from "./routes/auth";
+import { coursesRouter } from "./routes/courses";
 import { healthRouter } from "./routes/health";
+import { inboxRouter } from "./routes/inbox";
 import { meRouter } from "./routes/me";
+import { notesRouter } from "./routes/notes";
 import { scheduleRouter } from "./routes/schedule";
 import { semestersRouter } from "./routes/semesters";
+import { todayRouter } from "./routes/today";
 
 export function createApp() {
   const app = express();
@@ -33,6 +37,10 @@ export function createApp() {
   app.use("/api/me", meRouter);
   app.use("/api/schedule", scheduleRouter);
   app.use("/api/semesters", semestersRouter);
+  app.use("/api/today", todayRouter);
+  app.use("/api/courses", coursesRouter);
+  app.use("/api/notes", notesRouter);
+  app.use("/api/inbox", inboxRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
