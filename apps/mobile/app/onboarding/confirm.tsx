@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "expo-router";
+import { Redirect, useRouter } from "expo-router";
 import { useState } from "react";
 import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -71,7 +71,10 @@ export default function ScheduleConfirmScreen() {
       // First-time onboarding: the root layout switches to the tabs once there is an active semester.
       queryClient.setQueryData(activeSemesterKey, body);
       // Replacing from Settings: the tabs are still underneath, so pop back to them.
-      if (draft.replacing) router.dismissAll();
+      if (draft.replacing) {
+        router.dismissAll();
+        draft.endReplace();
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === "ACTIVE_SEMESTER_EXISTS") {
         Alert.alert("Aktif dönem var", "Yeni dönem eskisinin yerine geçsin mi? Eski dönemin notları silinmez.", [
@@ -94,6 +97,9 @@ export default function ScheduleConfirmScreen() {
     }
     void submit(draft.replacing);
   }
+
+  // Landing here without going through step 1 (e.g. as the initial route) starts over at step 1.
+  if (!draft.started) return <Redirect href="/onboarding/schedule" />;
 
   const title = courses.length === 0 ? "Dersleri ekle" : "Programını kontrol et";
   const subtitle =

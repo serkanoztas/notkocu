@@ -18,11 +18,15 @@ interface Draft {
   courses: DraftCourse[];
   /** True when the flow was opened from Settings to replace the active semester. */
   replacing: boolean;
+  /** Set once step 1 is done (parsed or "Elle gireceğim"); step 2 redirects to step 1 without it. */
+  started: boolean;
 }
 
 interface DraftValue extends Draft {
   /** Starts a fresh draft; `replacing` makes confirm send replaceActive: true. */
   begin: (replacing: boolean) => void;
+  /** Leaves replace mode (after success or cancel) without touching the draft contents. */
+  endReplace: () => void;
   setSemester: (patch: Partial<Pick<Draft, "name" | "startDate" | "weekCount">>) => void;
   setCourses: (courses: ScheduleCourseDraft[]) => void;
   updateCourse: (id: string, course: DraftCourse) => void;
@@ -48,15 +52,17 @@ const freshDraft = (replacing: boolean): Draft => ({
   weekCount: 14,
   courses: [],
   replacing,
+  started: false,
 });
 
 export function ScheduleDraftProvider({ children }: { children: ReactNode }) {
   const [draft, setDraft] = useState<Draft>(() => freshDraft(false));
 
   const begin = useCallback((replacing: boolean) => setDraft(freshDraft(replacing)), []);
+  const endReplace = useCallback(() => setDraft((d) => ({ ...d, replacing: false })), []);
   const setSemester = useCallback<DraftValue["setSemester"]>((patch) => setDraft((d) => ({ ...d, ...patch })), []);
   const setCourses = useCallback((courses: ScheduleCourseDraft[]) => {
-    setDraft((d) => ({ ...d, courses: courses.map(withId) }));
+    setDraft((d) => ({ ...d, courses: courses.map(withId), started: true }));
   }, []);
   const updateCourse = useCallback((id: string, course: DraftCourse) => {
     setDraft((d) => ({ ...d, courses: d.courses.map((c) => (c.id === id ? course : c)) }));
@@ -69,8 +75,8 @@ export function ScheduleDraftProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ ...draft, begin, setSemester, setCourses, updateCourse, addCourse, removeCourse }),
-    [draft, begin, setSemester, setCourses, updateCourse, addCourse, removeCourse],
+    () => ({ ...draft, begin, endReplace, setSemester, setCourses, updateCourse, addCourse, removeCourse }),
+    [draft, begin, endReplace, setSemester, setCourses, updateCourse, addCourse, removeCourse],
   );
   return <DraftContext.Provider value={value}>{children}</DraftContext.Provider>;
 }

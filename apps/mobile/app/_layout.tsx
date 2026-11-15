@@ -19,7 +19,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useActiveSemester } from "../src/hooks/useActiveSemester";
 import { AuthProvider, useAuth } from "../src/lib/auth";
 import { queryClient } from "../src/lib/queryClient";
-import { ScheduleDraftProvider } from "../src/lib/scheduleDraft";
+import { ScheduleDraftProvider, useScheduleDraft } from "../src/lib/scheduleDraft";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -54,6 +54,7 @@ function RootStack() {
   const { status } = useAuth();
   const signedIn = status === "signedIn";
   const semester = useActiveSemester(signedIn);
+  const { replacing } = useScheduleDraft();
 
   // Onboarding only when the request succeeded and there is no active semester.
   // Network errors / 5xx keep the tabs open (the Today screen offers a retry).
@@ -72,8 +73,8 @@ function RootStack() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="capture" options={{ presentation: "modal" }} />
       </Stack.Protected>
-      {/* Also reachable from Settings ("Ders programını yeniden yükle") while a semester is active. */}
-      <Stack.Protected guard={signedIn}>
+      {/* First-time setup, or replace mode opened from Settings while a semester is active. */}
+      <Stack.Protected guard={signedIn && (needsOnboarding || replacing)}>
         <Stack.Screen name="onboarding/schedule" />
         <Stack.Screen name="onboarding/confirm" />
       </Stack.Protected>

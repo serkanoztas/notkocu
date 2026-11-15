@@ -102,6 +102,7 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
     }
   }
   if (!res.ok) {
+    if (__DEV__ && res.status >= 500) console.warn(`[api] ${opts.method ?? "GET"} ${path} -> ${res.status}`);
     const code = await res
       .json()
       .then((b: { error?: { code?: string } }) => b?.error?.code)

@@ -155,7 +155,14 @@ export default function ScheduleUploadScreen() {
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ paddingTop: insets.top + 20, paddingHorizontal: 20, paddingBottom: 24 }}
       >
-        <StepHeader step={1} onBack={draft.replacing ? () => router.back() : undefined} />
+        <StepHeader step={1} onBack={
+            draft.replacing
+              ? () => {
+                  router.back();
+                  draft.endReplace();
+                }
+              : undefined
+          } />
 
         <Text className="mt-4 font-heading text-4xl text-ink">Dönemini kuralım</Text>
         <Text className="mt-2 font-body text-base text-muted">Haftalar bu tarihlerden otomatik oluşur.</Text>

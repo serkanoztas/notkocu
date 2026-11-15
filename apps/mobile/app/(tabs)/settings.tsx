@@ -1,5 +1,5 @@
 import { useRouter } from "expo-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, Text, View } from "react-native";
 import { Screen } from "../../src/components/Screen";
 import { useAuth } from "../../src/lib/auth";
@@ -10,6 +10,15 @@ export default function SettingsScreen() {
   const router = useRouter();
   const draft = useScheduleDraft();
   const [busy, setBusy] = useState(false);
+  const [openFlow, setOpenFlow] = useState(false);
+
+  // The onboarding screens only exist once replace mode is on, so navigate after that render.
+  useEffect(() => {
+    if (openFlow && draft.replacing) {
+      setOpenFlow(false);
+      router.push("/onboarding/schedule");
+    }
+  }, [openFlow, draft.replacing, router]);
 
   function onReloadSchedule() {
     Alert.alert("Ders programını yeniden yükle", "Mevcut program arşivlenecek, notların silinmez.", [
@@ -18,7 +27,7 @@ export default function SettingsScreen() {
         text: "Devam et",
         onPress: () => {
           draft.begin(true);
-          router.push("/onboarding/schedule");
+          setOpenFlow(true);
         },
       },
     ]);

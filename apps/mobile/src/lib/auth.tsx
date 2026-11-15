@@ -74,7 +74,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       const e = err as { code?: unknown; message?: unknown } | null;
       const debug = `[${String(e?.code ?? "no-code")}] ${String(e?.message ?? err)}`;
-      if (__DEV__) console.error("Google sign-in failed:", debug);
+      // Expected failures (API/network) are warnings; anything else is unexpected.
+      if (__DEV__) (err instanceof ApiError ? console.warn : console.error)("Google sign-in failed:", debug);
       const withDebug = (msg: string) => (__DEV__ ? `${msg}\n${debug}` : msg);
       if (isErrorWithCode(err)) {
         if (err.code === statusCodes.SIGN_IN_CANCELLED || err.code === statusCodes.IN_PROGRESS) return null;
