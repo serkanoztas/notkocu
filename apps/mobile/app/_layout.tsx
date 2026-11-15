@@ -14,7 +14,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useActiveSemester } from "../src/hooks/useActiveSemester";
 import { AuthProvider, useAuth } from "../src/lib/auth";
@@ -59,7 +59,15 @@ function RootStack() {
   // Onboarding only when the request succeeded and there is no active semester.
   // Network errors / 5xx keep the tabs open (the Today screen offers a retry).
   const needsOnboarding = semester.isSuccess && semester.data.semester === null;
-  const ready = status !== "loading" && (!signedIn || !semester.isPending);
+  const settled = status !== "loading" && (!signedIn || !semester.isPending);
+
+  // Latch "settled" per auth state. A refetch after an error flips a data-less query back to
+  // `pending`; without the latch the navigator would unmount/remount and its guards would change
+  // repeatedly ("REMOVE_ROUTES was not handled by any navigator"). It resets only when signedIn
+  // itself changes (login/logout), where holding the splash until the semester is known is right.
+  const booted = useRef<{ signedIn: boolean } | null>(null);
+  if (settled) booted.current = { signedIn };
+  const ready = booted.current !== null && booted.current.signedIn === signedIn;
 
   useEffect(() => {
     if (ready) SplashScreen.hideAsync();
