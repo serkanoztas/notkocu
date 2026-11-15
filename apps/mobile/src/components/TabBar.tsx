@@ -3,6 +3,7 @@ import { Tabs, useRouter } from "expo-router";
 import type { ComponentProps } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useInbox } from "../hooks/queries";
 import { colors } from "../theme";
 
 type IconName = keyof typeof Ionicons.glyphMap;
@@ -22,6 +23,7 @@ const CENTER_AFTER = 2;
 export function TabBar({ state, emitter, navigateToTab }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const inboxCount = useInbox().data?.count ?? 0;
 
   const items = state.routes.map((route, index) => {
     const meta = TABS[route.name];
@@ -40,7 +42,14 @@ export function TabBar({ state, emitter, navigateToTab }: BottomTabBarProps) {
         }}
         className="min-h-touch flex-1 items-center justify-center py-2"
       >
-        <Ionicons name={focused ? meta.iconActive : meta.icon} size={24} color={color} />
+        <View>
+          <Ionicons name={focused ? meta.iconActive : meta.icon} size={24} color={color} />
+          {route.name === "inbox" && inboxCount > 0 ? (
+            <View className="absolute -right-3 -top-2 min-w-[18px] items-center rounded-full bg-red-700 px-1">
+              <Text className="font-body-semibold text-xs text-white">{inboxCount > 99 ? "99+" : inboxCount}</Text>
+            </View>
+          ) : null}
+        </View>
         <Text
           numberOfLines={1}
           className={`mt-1 text-xs ${focused ? "font-body-semibold" : "font-body"}`}

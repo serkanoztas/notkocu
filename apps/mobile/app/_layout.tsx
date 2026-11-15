@@ -80,6 +80,9 @@ function RootStack() {
       <Stack.Protected guard={signedIn && !needsOnboarding}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="capture" options={{ presentation: "modal" }} />
+        <Stack.Screen name="course/[id]" />
+        <Stack.Screen name="course/[id]/week/[no]" />
+        <Stack.Screen name="note/[id]" />
       </Stack.Protected>
       {/* First-time setup, or replace mode opened from Settings while a semester is active. */}
       <Stack.Protected guard={signedIn && (needsOnboarding || replacing)}>

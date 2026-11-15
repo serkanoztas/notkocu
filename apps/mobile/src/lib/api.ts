@@ -2,9 +2,16 @@ import type {
   ActiveSemesterResponse,
   AuthResponse,
   ConfirmScheduleRequest,
+  CourseDetailResponse,
+  CreateNoteRequest,
   HealthResponse,
+  InboxResponse,
   MeResponse,
+  NoteResponse,
   ParseScheduleResponse,
+  TodayResponse,
+  UpdateNoteRequest,
+  WeekResponse,
 } from "@notkocu/shared";
 import { File } from "expo-file-system";
 import { tokenStore } from "./tokenStore";
@@ -127,6 +134,16 @@ export const api = {
     form.append("image", new File(image.uri) as unknown as Blob);
     return request<ParseScheduleResponse>("/api/schedule/parse", { method: "POST", form, timeoutMs: 60000 });
   },
+  today: () => request<TodayResponse>("/api/today"),
+  inbox: () => request<InboxResponse>("/api/inbox"),
+  course: (id: string) => request<CourseDetailResponse>(`/api/courses/${id}`),
+  week: (id: string, weekNo: number) => request<WeekResponse>(`/api/courses/${id}/weeks/${weekNo}`),
+  note: (id: string) => request<NoteResponse>(`/api/notes/${id}`),
+  createNote: (body: CreateNoteRequest) =>
+    request<NoteResponse>("/api/notes", { method: "POST", body, timeoutMs: 15000 }),
+  updateNote: (id: string, body: UpdateNoteRequest) =>
+    request<NoteResponse>(`/api/notes/${id}`, { method: "PATCH", body, timeoutMs: 15000 }),
+  deleteNote: (id: string) => request<void>(`/api/notes/${id}`, { method: "DELETE", timeoutMs: 15000 }),
   confirmSchedule: (body: ConfirmScheduleRequest) =>
     request<ActiveSemesterResponse>("/api/schedule/confirm", { method: "POST", body, timeoutMs: 15000 }),
   logout: (refreshToken: string) =>
