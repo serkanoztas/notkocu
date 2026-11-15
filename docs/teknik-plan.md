@@ -173,6 +173,7 @@ MVP 9 ekrandan oluşur ve hepsinin tıklanabilir mockup'ı hazır: [NotKoçu mob
 | Giriş | İlk kurulum | Google ile giriş (MVP'de e-posta yok) |
 | Program yükle | İlk kurulum | Dönem adı, başlangıç tarihi, hafta sayısı; ekran görüntüsü/PDF yükleme ve okuma adımları |
 | Program onayı | İlk kurulum | Haftalık takvim, emin olunamayan dersin düzeltilmesi |
+| Programı yeniden yükle | Ayarlar | Ayarlar'daki "Ders programını yeniden yükle" butonu onay sorar ("Mevcut program arşivlenir, notların silinmez"), sonra Program yükle ve Program onayı ekranlarını açar; onayda `replaceActive: true` gönderilir ve eski dönem `isActive=false` olur. Bu akışta Program yükle'de geri butonu vardır (vazgeçilebilir) |
 | Bugün | Ana gezinme | Devam eden ders kartı, sonraki dersler, haftanın görevleri, gelen kutusu uyarısı |
 | Ders sayfası | Ana gezinme | Ders saatleri, ders içinde arama, 14 haftalık grid, seçili haftanın özeti |
 | Hafta sayfası | Ana gezinme | AI özeti; "tipe göre" ve "zaman çizelgesi" görünümleri |
@@ -236,7 +237,7 @@ Uygulama içinde paylaşım sistemi kurulmaz. Dışarıyla alışveriş tamamen 
 MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak önerildi. Her aşama kendi başına çalışan bir parça bırakır, böylece plan herhangi bir noktada kesilse bile elde kullanılabilir bir ürün kalır.
 
 1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
-2. [ ] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
+2. [x] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
 3. [ ] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
 4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
@@ -246,6 +247,11 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 
 - `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` (mobil) ve `GOOGLE_WEB_CLIENT_ID` (API) aynı **Web application** client ID'sidir.
 - Android client ID hiçbir `.env`'e yazılmaz. Android OAuth client yalnızca Google Cloud'da paket adı ve SHA-1 ile tanımlanır, uygulama kodu onu kullanmaz. Yanlışlıkla `.env`'e yazılırsa giriş sessizce başarısız olur ve API'ye istek gitmez.
+
+**Kurulum notları (mobil):**
+
+- SDK 58'de global `fetch` = `expo/fetch`; FormData'ya dosya `expo-file-system` `File` ile eklenir, `{ uri, name, type }` çalışmaz ("Unsupported FormDataPart implementation" hatası verir ve istek cihazdan hiç çıkmaz).
+- `Stack.Protected` guard'ları açılışta ara durumlara göre değişmemeli; `ready` bir kez kilitlenir (`_layout.tsx`). Aksi halde navigator hazır olmadan rota listesi değişir ve LogBox'ta "REMOVE_ROUTES was not handled by any navigator" hataları birikir.
 
 Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomatik atama ve hafta yapısı ona bağlı. Ses, en pahalı ve en riskli tip olduğu için sona bırakıldı. MVP sonrası için aday özellikler: ders içinde RAG ile soru sorma, quiz ve flashcard üretimi, görsel kart olarak dışa aktarma.
 
