@@ -72,7 +72,8 @@ function RootStack() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="capture" options={{ presentation: "modal" }} />
       </Stack.Protected>
-      <Stack.Protected guard={signedIn && needsOnboarding}>
+      {/* Also reachable from Settings ("Ders programını yeniden yükle") while a semester is active. */}
+      <Stack.Protected guard={signedIn}>
         <Stack.Screen name="onboarding/schedule" />
         <Stack.Screen name="onboarding/confirm" />
       </Stack.Protected>

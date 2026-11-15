@@ -68,8 +68,10 @@ export default function ScheduleConfirmScreen() {
         })),
         replaceActive,
       });
-      // The root layout switches to the tabs once there is an active semester.
+      // First-time onboarding: the root layout switches to the tabs once there is an active semester.
       queryClient.setQueryData(activeSemesterKey, body);
+      // Replacing from Settings: the tabs are still underneath, so pop back to them.
+      if (draft.replacing) router.dismissAll();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === "ACTIVE_SEMESTER_EXISTS") {
         Alert.alert("Aktif dönem var", "Yeni dönem eskisinin yerine geçsin mi? Eski dönemin notları silinmez.", [
@@ -90,7 +92,7 @@ export default function ScheduleConfirmScreen() {
       setEditing({ mode: "edit", course: invalid });
       return;
     }
-    void submit(false);
+    void submit(draft.replacing);
   }
 
   const title = courses.length === 0 ? "Dersleri ekle" : "Programını kontrol et";
