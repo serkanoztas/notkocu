@@ -6,6 +6,7 @@ import type {
   MeResponse,
   ParseScheduleResponse,
 } from "@notkocu/shared";
+import { File } from "expo-file-system";
 import { tokenStore } from "./tokenStore";
 
 const BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
@@ -54,6 +55,10 @@ async function send(path: string, opts: Options, accessToken: string | null): Pr
   } catch (err) {
     if (__DEV__) console.warn(`[api] ${opts.method ?? "GET"} ${path} failed (timedOut=${timedOut}):`, err);
     if (timedOut) throw new ApiError("İstek zaman aşımına uğradı", undefined, "TIMEOUT");
+    // fetch failed while building the request (e.g. "Unsupported FormDataPart implementation"): nothing left the device.
+    if (opts.form && err instanceof Error && /Unsupported FormData/i.test(err.message)) {
+      throw new ApiError("Görsel gönderilemedi", undefined, "CLIENT_REQUEST");
+    }
     throw new ApiError("Ağ hatası: sunucuya bağlanılamadı", undefined, "NETWORK");
   } finally {
     clearTimeout(timer);
@@ -115,8 +120,10 @@ export const api = {
   activeSemester: () => request<ActiveSemesterResponse>("/api/semesters/active"),
   parseSchedule: (image: { uri: string; name: string; type: string }) => {
     const form = new FormData();
-    // React Native's FormData accepts a { uri, name, type } descriptor in place of a Blob.
-    form.append("image", image as unknown as Blob);
+    // The global fetch is expo/fetch (SDK 58), which rejects RN's { uri, name, type } descriptor.
+    // expo-file-system's File is Blob-like (has bytes(), name, type), so it is accepted as a part.
+    // It takes name/type from the file URI; the picker's cache files carry a proper extension.
+    form.append("image", new File(image.uri) as unknown as Blob);
     return request<ParseScheduleResponse>("/api/schedule/parse", { method: "POST", form, timeoutMs: 60000 });
   },
   confirmSchedule: (body: ConfirmScheduleRequest) =>

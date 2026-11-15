@@ -16,6 +16,7 @@ type Picked = { uri: string; name: string; type: string };
 
 function readErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.code === "CLIENT_REQUEST") return "Görsel gönderilemedi, başka bir görselle tekrar dene";
     if (err.code === "TIMEOUT") return "İstek zaman aşımına uğradı, tekrar dene";
     if (err.code === "NETWORK") return "Ağ hatası: sunucuya bağlanılamadı, bağlantını kontrol et";
     if (err.status && err.status >= 500) return "Sunucu hatası, biraz sonra tekrar dene";
