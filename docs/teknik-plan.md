@@ -248,7 +248,7 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 
 1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
 2. [x] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
-3. [ ] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
+3. [x] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
 4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi; çevrimdışı not kuyruğu: not önce cihaza kaydedilir, bağlantı gelince gönderilir
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test
