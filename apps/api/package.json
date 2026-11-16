@@ -10,6 +10,7 @@
     "worker": "tsx watch src/worker/index.ts",
     "start:worker": "node dist/worker/index.js",
     "try-parse": "tsx scripts/try-parse.ts",
+    "check-docs": "tsx scripts/check-docs.ts",
     "check-queue": "tsx scripts/check-queue.ts",
     "check-http": "tsx scripts/check-http.ts",
     "typecheck": "tsc --noEmit"

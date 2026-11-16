@@ -6,6 +6,8 @@ import type { NoteResponse } from "@notkocu/shared";
 import { requireAuth } from "../middleware/requireAuth";
 import { NoteItemModel } from "../models";
 import { assertWithinLimit, deleteFiles, saveFile } from "../services/files";
+import { sniffDocument } from "../services/documents/sniff";
+import { DOCUMENT_MIME } from "../services/documents/types";
 import { processImage, sniffImageMime } from "../services/imageProcess";
 import { requeue } from "../services/queue";
 import {
@@ -27,17 +29,14 @@ const markdown = z.string().trim().min(1).max(MAX_MARKDOWN);
 const title = z.string().trim().max(120);
 const objectIdLike = z.string().min(1).max(40);
 
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // documents; photos are capped lower after sniffing
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_IMAGE_TITLE = "Fotoğraf";
 
+// The declared mime is not trusted anywhere: the real type is read from the bytes (sniff*).
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
-  fileFilter: (_req, file, cb) => {
-    if (IMAGE_TYPES.has(file.mimetype)) return cb(null, true);
-    cb(new AppError(400, "Desteklenmeyen dosya türü", "UNSUPPORTED_IMAGE_TYPE"));
-  },
 });
 
 /** Multipart bodies carry a photo; JSON bodies (text notes) pass through untouched. */
@@ -47,7 +46,7 @@ const receiveUpload: RequestHandler = (req, res, next) => {
     if (err instanceof multer.MulterError) {
       return next(
         err.code === "LIMIT_FILE_SIZE"
-          ? new AppError(413, "Fotoğraf en fazla 10 MB olabilir", "IMAGE_TOO_LARGE")
+          ? new AppError(413, "Dosya en fazla 20 MB olabilir", "FILE_TOO_LARGE")
           : new AppError(400, "Geçersiz yükleme", "INVALID_UPLOAD"),
       );
     }
@@ -66,21 +65,39 @@ const uploadLimiter = rateLimit({
 });
 
 // Multipart has no null, so "inbox" is its own flag; fields arrive as strings.
-const imageForm = z.object({
-  type: z.literal("image"),
+const uploadForm = z.object({
+  type: z.enum(["image", "document"]),
   title: title.optional(),
   courseId: objectIdLike.optional(),
   weekNo: z.coerce.number().int().min(1).max(60).optional(),
   inbox: z.enum(["1", "true"]).optional(),
 });
 
-const createBody = z.object({
-  type: z.literal("text"),
-  title: title.optional(),
-  markdown,
+const targetFields = {
   courseId: objectIdLike.nullable().optional(),
   weekNo: z.number().int().min(1).max(60).optional(),
-});
+};
+
+const createBody = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), title: title.optional(), markdown, ...targetFields }),
+  z.object({
+    type: z.literal("link"),
+    title: title.optional(),
+    url: z
+      .string()
+      .trim()
+      .max(2048)
+      .refine((u) => {
+        try {
+          const { protocol } = new URL(u);
+          return protocol === "http:" || protocol === "https:";
+        } catch {
+          return false;
+        }
+      }, "Geçersiz bağlantı"),
+    ...targetFields,
+  }),
+]);
 
 const updateBody = z
   .object({
@@ -102,22 +119,52 @@ async function findOwnNote(userId: string, id: string | undefined) {
 
 type Target = { courseId: string; weekNo: number; sessionId?: string } | null;
 
-async function createImageNote(userId: string, raw: unknown, file: Express.Multer.File | undefined) {
-  if (!file) throw new AppError(400, "Fotoğraf gerekli", "IMAGE_REQUIRED");
-  const form = imageForm.parse(raw);
+/** Explicit inbox / manual course+week / (nothing given) the shared auto-assignment rule. */
+async function resolveTarget(
+  userId: string,
+  want: { courseId?: string | null; weekNo?: number },
+): Promise<Target> {
+  if (want.courseId === undefined) return autoAssign(userId, new Date()); // the server clock decides, in the user's time zone
+  if (want.courseId === null) return null; // explicit inbox
+  if (want.weekNo === undefined) throw new AppError(400, "weekNo gerekli", "VALIDATION_ERROR");
+  await assertManualTarget(userId, want.courseId, want.weekNo);
+  return { courseId: want.courseId, weekNo: want.weekNo };
+}
+
+const placement = (target: Target) => ({
+  courseId: target?.courseId ?? null,
+  weekNo: target?.weekNo,
+  sessionId: target?.sessionId,
+});
+
+/** multer decodes the multipart filename as latin1; recover UTF-8 names (Turkish letters) when that happened. */
+function cleanFileName(raw: string): string {
+  let name = raw;
+  if ([...raw].every((c) => c.charCodeAt(0) <= 0xff)) {
+    const decoded = Buffer.from(raw, "latin1").toString("utf8");
+    if (!decoded.includes("\uFFFD")) name = decoded;
+  }
+  return name.replace(/[\\/\u0000-\u001f]/g, "_").trim().slice(0, 120) || "belge";
+}
+
+async function createUploadNote(userId: string, raw: unknown, file: Express.Multer.File | undefined) {
+  if (!file) throw new AppError(400, "Dosya gerekli", "FILE_REQUIRED");
+  const form = uploadForm.parse(raw);
+  const target = await resolveTarget(userId, { courseId: form.inbox ? null : form.courseId, weekNo: form.weekNo });
+  return form.type === "image"
+    ? createImageNote(userId, form, target, file)
+    : createDocumentNote(userId, form, target, file);
+}
+
+async function createImageNote(
+  userId: string,
+  form: z.infer<typeof uploadForm>,
+  target: Target,
+  file: Express.Multer.File,
+) {
   const mime = sniffImageMime(file.buffer);
   if (!mime) throw new AppError(400, "Desteklenmeyen dosya türü", "UNSUPPORTED_IMAGE_TYPE");
-
-  let target: Target;
-  if (form.inbox) {
-    target = null;
-  } else if (form.courseId === undefined) {
-    target = await autoAssign(userId, new Date()); // the server clock decides, in the user's time zone
-  } else {
-    if (form.weekNo === undefined) throw new AppError(400, "weekNo gerekli", "VALIDATION_ERROR");
-    await assertManualTarget(userId, form.courseId, form.weekNo);
-    target = { courseId: form.courseId, weekNo: form.weekNo };
-  }
+  if (file.buffer.length > MAX_IMAGE_BYTES) throw new AppError(413, "Fotoğraf en fazla 10 MB olabilir", "IMAGE_TOO_LARGE");
 
   const processed = await processImage(file.buffer, mime);
   await assertWithinLimit(userId, processed.main.length + (processed.thumb?.length ?? 0));
@@ -133,9 +180,7 @@ async function createImageNote(userId: string, raw: unknown, file: Express.Multe
 
     return await NoteItemModel.create({
       userId,
-      courseId: target?.courseId ?? null,
-      weekNo: target?.weekNo,
-      sessionId: target?.sessionId,
+      ...placement(target),
       type: "image",
       title: form.title || DEFAULT_IMAGE_TITLE,
       content: { fileKey, thumbKey, mime: processed.mime, width: processed.width, height: processed.height },
@@ -148,6 +193,35 @@ async function createImageNote(userId: string, raw: unknown, file: Express.Multe
   }
 }
 
+async function createDocumentNote(
+  userId: string,
+  form: z.infer<typeof uploadForm>,
+  target: Target,
+  file: Express.Multer.File,
+) {
+  const kind = sniffDocument(file.buffer);
+  if (!kind) throw new AppError(400, "Yalnızca PDF, DOCX ve PPTX desteklenir", "UNSUPPORTED_DOCUMENT_TYPE");
+  await assertWithinLimit(userId, file.buffer.length);
+
+  const fileName = cleanFileName(file.originalname);
+  const mime = DOCUMENT_MIME[kind];
+  const fileKey = await saveFile(userId, file.buffer, { mime, filename: fileName });
+  try {
+    return await NoteItemModel.create({
+      userId,
+      ...placement(target),
+      type: "document",
+      title: form.title || fileName.replace(/\.[^.]+$/, "") || "Belge",
+      content: { fileKey, mime, fileName, size: file.buffer.length },
+      status: "pending", // the worker extracts the text
+      source: "app",
+    });
+  } catch (err) {
+    await deleteFiles(userId, [fileKey]);
+    throw err;
+  }
+}
+
 notesRouter.post(
   "/",
   uploadLimiter,
@@ -156,7 +230,7 @@ notesRouter.post(
     const userId = req.userId;
 
     if (req.is("multipart/form-data")) {
-      const note = await createImageNote(userId, req.body, req.file);
+      const note = await createUploadNote(userId, req.body, req.file);
       await markWeeksStale(userId, [note]);
       const out: NoteResponse = { note: serializeNote(note.toJSON()) };
       res.status(201).json(out);
@@ -164,30 +238,30 @@ notesRouter.post(
     }
 
     const body = createBody.parse(req.body);
+    const target = await resolveTarget(userId, body);
 
-    let target: Target;
-    if (body.courseId === undefined) {
-      target = await autoAssign(userId, new Date()); // the server clock decides, in the user's time zone
-    } else if (body.courseId === null) {
-      target = null; // explicit inbox
-    } else {
-      if (body.weekNo === undefined) throw new AppError(400, "weekNo gerekli", "VALIDATION_ERROR");
-      await assertManualTarget(userId, body.courseId, body.weekNo);
-      target = { courseId: body.courseId, weekNo: body.weekNo };
-    }
-
-    const note = await NoteItemModel.create({
-      userId,
-      courseId: target?.courseId ?? null,
-      weekNo: target?.weekNo,
-      sessionId: target?.sessionId,
-      type: "text",
-      title: body.title || titleFromMarkdown(body.markdown),
-      content: { markdown: body.markdown },
-      extractedText: body.markdown,
-      status: "ready", // text needs no processing
-      source: "app",
-    });
+    const note =
+      body.type === "text"
+        ? await NoteItemModel.create({
+            userId,
+            ...placement(target),
+            type: "text",
+            title: body.title || titleFromMarkdown(body.markdown),
+            content: { markdown: body.markdown },
+            extractedText: body.markdown,
+            status: "ready", // text needs no processing
+            source: "app",
+          })
+        : await NoteItemModel.create({
+            userId,
+            ...placement(target),
+            type: "link",
+            title: body.title || new URL(body.url).hostname,
+            content: { url: body.url, siteTitle: body.title || undefined },
+            extractedText: [body.title, body.url].filter(Boolean).join("\n"),
+            status: "ready", // only url + title are kept, nothing to process
+            source: "app",
+          });
     await markWeeksStale(userId, [note]);
     const out: NoteResponse = { note: serializeNote(note.toJSON()) };
     res.status(201).json(out);

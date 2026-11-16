@@ -69,9 +69,14 @@ export interface TextContent {
   markdown: string;
 }
 export interface DocumentContent {
+  /** GridFS id of the original file (PDF, DOCX or PPTX); GET /api/files/:id. */
   fileKey: string;
   mime: string;
+  fileName?: string;
+  size?: number;
   pageCount?: number;
+  /** What each entry of `pages` is: a PDF page, a PPTX slide or (DOCX without page breaks) a section. */
+  unit?: "page" | "slide" | "section";
   pages?: string[];
 }
 export interface ImageContent {
@@ -225,14 +230,26 @@ export interface HealthResponse {
 
 export type SessionState = "upcoming" | "ongoing" | "done";
 
-export interface CreateNoteRequest {
-  type: "text";
-  title?: string;
-  markdown: string;
+interface CreateNoteTarget {
   /** Omitted = the server auto-assigns by the current time; null = inbox; an id = manual (weekNo required). */
   courseId?: Id | null;
   weekNo?: number;
 }
+
+export interface CreateTextNoteRequest extends CreateNoteTarget {
+  type: "text";
+  title?: string;
+  markdown: string;
+}
+
+/** Link note: only the url and a title are stored (the page is not fetched). */
+export interface CreateLinkNoteRequest extends CreateNoteTarget {
+  type: "link";
+  url: string;
+  title?: string;
+}
+
+export type CreateNoteRequest = CreateTextNoteRequest | CreateLinkNoteRequest;
 
 export interface UpdateNoteRequest {
   title?: string;

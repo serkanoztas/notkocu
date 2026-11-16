@@ -1,14 +1,24 @@
 // End-to-end check of the photo-note API over HTTP, with throw-away users (no Google login needed).
-// Needs the worker running in another terminal (`npm run worker`) to see the note become "ready".
-// Run: npm run check-http   (uses the real Gemini key for one small OCR call; cleans up after itself)
+// Runs the worker loop in-process (only for its own throw-away notes), so no separate worker is needed.
+// By default Gemini is FAKE (no real requests). Real requests only with CHECK_REAL_GEMINI=1.
+// Stop any other running worker first: it could claim these notes too.
+// Run: npm run check-http   (cleans up after itself, also when interrupted)
 import type { Server } from "node:http";
 import mongoose from "mongoose";
+import { strToU8, zipSync } from "fflate";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import { createApp } from "../src/app";
 import { env } from "../src/config/env";
 import { NoteItemModel } from "../src/models";
+import { ocrPdfPages } from "../src/services/ai/documentOcr";
 import { deleteUserFiles, getUsage } from "../src/services/files";
 import { signAccessToken } from "../src/services/auth/tokens";
+import { startWorker } from "../src/worker/run";
+import { REAL_GEMINI, setupGemini } from "./lib/geminiMode";
+
+const gemini = setupGemini();
+let worker: { stop: () => Promise<void> } | undefined;
 
 let failures = 0;
 function check(name: string, ok: boolean, extra = "") {
@@ -20,6 +30,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const userA = new mongoose.Types.ObjectId().toHexString();
 const userB = new mongoose.Types.ObjectId().toHexString();
 
+/** Removes everything this script created. Also runs when the script is interrupted or timed out. */
+async function cleanup() {
+  await worker?.stop();
+  await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await deleteUserFiles(userA);
+  await deleteUserFiles(userB);
+}
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => void cleanup().catch(() => undefined).finally(() => process.exit(130)));
+}
+
 async function photoWithText() {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400"><rect width="100%" height="100%" fill="white"/>
     <text x="40" y="100" font-size="56" font-family="Arial" fill="black">Veritabani Yonetimi</text>
@@ -28,8 +49,30 @@ async function photoWithText() {
   return sharp(Buffer.from(svg)).jpeg().toBuffer();
 }
 
+/** A PDF; each page is text (text layer) or null (blank), and an optional image fills the first page. */
+async function makePdf(pages: (string | null)[], image: Buffer | null): Promise<Buffer> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const [i, text] of pages.entries()) {
+    const page = doc.addPage([600, 400]);
+    if (text) page.drawText(text, { x: 20, y: 360, size: 11, font, maxWidth: 560, lineHeight: 14 });
+    if (image && i === 0) {
+      const png = await doc.embedPng(image);
+      page.drawImage(png, { x: 0, y: 0, width: 600, height: 400 });
+    }
+  }
+  return Buffer.from(await doc.save());
+}
+
+/** Text only as pixels, like a scan: no text layer in the resulting PDF. */
+async function scanImage(): Promise<Buffer> {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="100%" height="100%" fill="white"/><text x="60" y="200" font-size="96" font-family="Arial" fill="black">Sistem Analizi</text><text x="60" y="360" font-size="72" font-family="Arial" fill="black">Use case diyagrami</text></svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
 async function main() {
   await mongoose.connect(env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000 });
+  worker = startWorker({ concurrency: 2, claimFilter: { userId: { $in: [userA, userB] } } });
   const server: Server = await new Promise((resolve) => {
     const s = createApp().listen(0, "127.0.0.1", () => resolve(s));
   });
@@ -70,8 +113,8 @@ async function main() {
     check("pdf mime rejected 400", res.status === 400);
     res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(Buffer.from("this is plain text pretending to be a jpeg"), { type: "image", inbox: "1" }) });
     check("fake jpeg (magic bytes) rejected 400", res.status === 400);
-    res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(Buffer.alloc(11 * 1024 * 1024, 1), { type: "image", inbox: "1" }) });
-    check("11 MB rejected 413", res.status === 413);
+    res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(11 * 1024 * 1024, 0)]), { type: "image", inbox: "1" }) });
+    check("11 MB photo rejected 413", res.status === 413);
 
     res = await fetch(`${base}/api/me/storage`, { headers: auth(tokenA) });
     const storage = (await res.json()) as { usedBytes: number; limitBytes: number };
@@ -84,7 +127,7 @@ async function main() {
     res = await fetch(`${base}/api/notes/${noteId}`, { headers: auth(tokenB) });
     check("other user cannot read the note", res.status === 404);
 
-    // The worker (separate process) should finish the note.
+    // The in-process worker should finish the note.
     let status = "pending";
     let note: { status: string; extractedText?: string; aiSummary?: string; title: string; content: { ocrMarkdown?: string } } | undefined;
     for (let i = 0; i < 40 && status !== "ready" && status !== "failed"; i++) {
@@ -100,20 +143,90 @@ async function main() {
       check("ocr text mentions the photo content", /normalizasyon|indeks/i.test(note.content.ocrMarkdown ?? ""));
     }
 
+    // --- link note (JSON) ---
+    const jsonPost = (token: string, body: unknown) =>
+      fetch(`${base}/api/notes`, { method: "POST", headers: { ...auth(token), "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    res = await jsonPost(tokenA, { type: "link", url: "https://example.com/kaynak", title: "Ders kaynağı", courseId: null });
+    const link = (await res.json()) as { note: { _id: string; status: string; title: string; extractedText?: string; content: { url: string } } };
+    check("link note ready, url + title only", res.status === 201 && link.note.status === "ready" && link.note.content.url === "https://example.com/kaynak" && link.note.title === "Ders kaynağı");
+    res = await jsonPost(tokenA, { type: "link", url: "javascript:alert(1)", courseId: null });
+    check("non-http link rejected 400", res.status === 400);
+
+    // --- document notes (text-layer PDF, DOCX, PPTX, scanned PDF) ---
+    const uploadDoc = async (buf: Buffer, name: string, mime = "application/octet-stream") => {
+      const f = new FormData();
+      f.append("type", "document");
+      f.append("inbox", "1");
+      f.append("file", new Blob([buf], { type: mime }), name);
+      const r = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: f });
+      return { status: r.status, body: (await r.json()) as { note?: { _id: string; status: string; title: string; content: Record<string, unknown> } } };
+    };
+    const waitReady = async (id: string) => {
+      for (let i = 0; i < 60; i++) {
+        const n = ((await (await fetch(`${base}/api/notes/${id}`, { headers: auth(tokenA) })).json()) as { note: { status: string; extractedText?: string; aiSummary?: string; content: { pages?: string[]; pageCount?: number; unit?: string } } }).note;
+        if (n.status === "ready" || n.status === "failed") return n;
+        await sleep(3000);
+      }
+      return null;
+    };
+
+    const textPdf = await makePdf(["Normalizasyon birinci normal form her hucrede tek deger olmalidir. ".repeat(3), "Ikinci normal form kismi bagimliliklari ayirir ve anahtar alanlara bakar. ".repeat(3)], null);
+    let up = await uploadDoc(textPdf, "Veritabani Notlari.pdf", "application/pdf");
+    check("pdf upload -> 201 pending, title from file name", up.status === 201 && up.body.note?.status === "pending" && up.body.note.title === "Veritabani Notlari");
+    const pdfNote = await waitReady(up.body.note!._id);
+    check("text-layer pdf ready with 2 pages + summary", pdfNote?.status === "ready" && pdfNote.content.pageCount === 2 && pdfNote.content.unit === "page" && !!pdfNote.aiSummary, JSON.stringify({ s: pdfNote?.status, n: pdfNote?.content.pageCount }));
+    check("pdf extractedText from the text layer", /Normalizasyon/.test(pdfNote?.extractedText ?? ""));
+
+    const docxBuf = Buffer.from(zipSync({ "[Content_Types].xml": strToU8("<Types/>"), "word/document.xml": strToU8(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Indeksleme B-tree yapisini kullanir ve arama maliyetini azaltir.</w:t></w:r></w:p></w:body></w:document>`) }));
+    up = await uploadDoc(docxBuf, "İndeksleme_çalışma.docx");
+    check("docx upload keeps the Turkish file name", up.status === 201 && up.body.note?.content.fileName === "İndeksleme_çalışma.docx", String(up.body.note?.content.fileName));
+    const docxNote = await waitReady(up.body.note!._id);
+    check("docx ready, one section", docxNote?.status === "ready" && docxNote.content.pageCount === 1 && /B-tree/.test(docxNote.extractedText ?? ""));
+
+    up = await uploadDoc(Buffer.from("PK\u0003\u0004 not really a document at all"), "x.docx");
+    check("fake docx rejected 400", up.status === 400);
+    up = await uploadDoc(Buffer.alloc(21 * 1024 * 1024, 1), "big.pdf", "application/pdf");
+    check("21 MB document rejected 413", up.status === 413);
+
+    const scannedPdf = await makePdf([null], await scanImage());
+    up = await uploadDoc(scannedPdf, "taranmis.pdf", "application/pdf");
+    const scannedNote = await waitReady(up.body.note!._id);
+    check("scanned pdf (no text layer) read by Gemini", scannedNote?.status === "ready" && /sistem|analiz|tasar/i.test(scannedNote.extractedText ?? ""), (scannedNote?.extractedText ?? "").slice(0, 80));
+
+    // Quota (429) handling needs a Gemini we can make fail, so it only runs with the fake.
+    if (gemini) {
+      gemini.failNextWith(429);
+      res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(jpg, { type: "image", inbox: "1" }) });
+      const quotaId = ((await res.json()) as { note: { _id: string } }).note._id;
+      let job: { status: string; job?: { attempts?: number; deferrals?: number; runAt?: Date } } | null = null;
+      for (let i = 0; i < 20; i++) {
+        job = await NoteItemModel.findById(quotaId).lean();
+        if (job?.job?.deferrals === 1) break;
+        await sleep(500);
+      }
+      check(
+        "429 -> deferred ~60 s, attempt not used",
+        job?.status === "pending" && job.job?.attempts === 0 && job.job.deferrals === 1 && +job.job.runAt! - Date.now() > 50_000,
+        JSON.stringify(job?.job),
+      );
+    }
+
+    // Large-file path: same PDF through the Files API (and deleted at the provider afterwards).
+    const viaFilesApi = await ocrPdfPages(scannedPdf, { forceFilesApi: true });
+    check("Files API path works", viaFilesApi.length === 1 && /sistem|analiz|tasar/i.test(viaFilesApi[0] ?? ""));
+
     // Storage limit: shrink it for one request by filling usage logically is hard, so check the 413 path directly.
     const before = await getUsage(userA);
     check("usage still counted", before > 0);
 
     res = await fetch(`${base}/api/notes/${noteId}`, { method: "DELETE", headers: auth(tokenA) });
     check("delete note 204", res.status === 204);
-    check("files removed with the note", (await getUsage(userA)) === 0);
+    check("the photo and its thumbnail were removed with the note", (await getUsage(userA)) < before);
     res = await fetch(`${base}/api/files/${content.fileKey}`, { headers: auth(tokenA) });
     check("file 404 after delete", res.status === 404);
   } finally {
     server.close();
-    await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
-    await deleteUserFiles(userA);
-    await deleteUserFiles(userB);
+    await cleanup();
     await mongoose.disconnect();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");

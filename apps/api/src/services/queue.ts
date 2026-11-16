@@ -11,13 +11,14 @@ const BACKOFF_MS = 30_000;
 const QUOTA_DELAY_MS = 60_000;
 
 /** Types the worker knows how to process. */
-const HANDLED_TYPES = ["image"];
+const HANDLED_TYPES = ["image", "document"];
 
 /** Atomically takes the next due job (or an expired lease). Returns the note with job.attempts already counted. */
-export async function claimNext() {
+export async function claimNext(extraFilter: Record<string, unknown> = {}) {
   const now = new Date();
   return NoteItemModel.findOneAndUpdate(
     {
+      ...extraFilter,
       type: { $in: HANDLED_TYPES },
       "job.attempts": { $lt: MAX_ATTEMPTS },
       $or: [

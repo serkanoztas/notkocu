@@ -1,22 +1,9 @@
 import { ThinkingLevel, Type, type Schema } from "@google/genai";
 import { z } from "zod";
+import { OcrError, toAiError } from "./errors";
 import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
 
-/** Gemini quota / rate limit (429): the queue waits instead of burning an attempt. */
-export class QuotaError extends Error {
-  constructor() {
-    super("AI quota exceeded");
-    this.name = "QuotaError";
-  }
-}
-
-/** Other provider or output problems: a normal failed attempt. `code` is safe to store and log. */
-export class OcrError extends Error {
-  constructor(public readonly code: string) {
-    super(code);
-    this.name = "OcrError";
-  }
-}
+export { OcrError, QuotaError } from "./errors";
 
 const SYSTEM_PROMPT = `Sen bir üniversite öğrencisinin ders notu fotoğraflarını okuyan bir asistansın. Görsel bir tahta, slayt, kitap sayfası, defter ya da ekran görüntüsü olabilir (Türkçe ya da İngilizce).
 
@@ -77,10 +64,7 @@ export async function ocrImage(image: { data: Buffer; mimeType: string }): Promi
     });
     text = res.text;
   } catch (err) {
-    const e = err as { status?: number; message?: string };
-    console.error(`Gemini OCR request failed (status ${e.status ?? "unknown"})`);
-    if (e.status === 429 || /RESOURCE_EXHAUSTED/i.test(e.message ?? "")) throw new QuotaError();
-    throw new OcrError(`AI_${e.status ?? "UNAVAILABLE"}`);
+    throw toAiError(err, "OCR");
   }
 
   try {

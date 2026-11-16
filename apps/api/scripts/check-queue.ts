@@ -7,7 +7,9 @@ import { NoteItemModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
+import { setupGemini } from "./lib/geminiMode";
 
+setupGemini(); // this script never asks Gemini anything; the fake only guarantees that by default
 let failures = 0;
 function check(name: string, ok: boolean) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
@@ -16,6 +18,16 @@ function check(name: string, ok: boolean) {
 
 const userA = new mongoose.Types.ObjectId().toHexString();
 const userB = new mongoose.Types.ObjectId().toHexString();
+
+/** Removes everything this script created. Also runs when the script is interrupted or timed out. */
+async function cleanup() {
+  await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await deleteUserFiles(userA);
+  await deleteUserFiles(userB);
+}
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => void cleanup().catch(() => undefined).finally(() => process.exit(130)));
+}
 
 async function newImageNote(userId: string) {
   return NoteItemModel.create({ userId, courseId: null, type: "image", title: "Fotoğraf", content: { fileKey: "x" }, status: "pending" });
@@ -107,9 +119,7 @@ async function main() {
     await sweepExhausted();
     check("sweep fails exhausted expired leases", (await NoteItemModel.findById(n2._id))?.status === "failed");
   } finally {
-    await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
-    await deleteUserFiles(userA);
-    await deleteUserFiles(userB);
+    await cleanup();
     await mongoose.disconnect();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
