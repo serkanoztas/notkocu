@@ -3,6 +3,7 @@ import express from "express";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { authRouter } from "./routes/auth";
 import { coursesRouter } from "./routes/courses";
+import { filesRouter } from "./routes/files";
 import { healthRouter } from "./routes/health";
 import { inboxRouter } from "./routes/inbox";
 import { meRouter } from "./routes/me";
@@ -41,6 +42,7 @@ export function createApp() {
   app.use("/api/courses", coursesRouter);
   app.use("/api/notes", notesRouter);
   app.use("/api/inbox", inboxRouter);
+  app.use("/api/files", filesRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

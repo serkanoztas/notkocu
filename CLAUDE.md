@@ -14,9 +14,9 @@ Bir işe başlamadan önce ilgili bölümü oku:
 
 - `apps/mobile`: Expo (dev build), Expo Router, NativeWind, TanStack Query, TypeScript
 - `apps/api`: Node.js + Express + Mongoose, TypeScript
-- `apps/api/src/worker`: BullMQ + Redis worker'ı (OCR, transkript, özet)
+- `apps/api/src/worker`: MongoDB tabanlı kuyruğu işleyen worker (OCR, transkript, özet)
 - `packages/shared`: Mobil ve API arasında paylaşılan tipler (NoteItem, Course, Session…)
-- Veritabanı MongoDB Atlas, dosyalar S3 uyumlu depolamada (imzalı URL), AI için Gemini, bildirim için Expo Push
+- Veritabanı MongoDB Atlas, dosyalar MongoDB GridFS'te (auth'lu akış endpoint'i), AI için Gemini, bildirim için Expo Push
 
 ## Kurallar
 

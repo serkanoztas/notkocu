@@ -1,10 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TargetPicker, type PickedTarget } from "../src/components/TargetPicker";
-import { useCreateNote } from "../src/hooks/queries";
+import { useCreateImageNote, useCreateNote } from "../src/hooks/queries";
 import { useNow, useTimeZone } from "../src/hooks/useNow";
 import { findAutoTarget, useScheduleNow } from "../src/hooks/useSchedule";
 import { ApiError } from "../src/lib/api";
@@ -13,7 +14,7 @@ type IconName = keyof typeof Ionicons.glyphMap;
 
 const TYPES: { key: string; label: string; icon: IconName; active: boolean }[] = [
   { key: "text", label: "Metin", icon: "reorder-three-outline", active: true },
-  { key: "image", label: "Fotoğraf", icon: "camera-outline", active: false },
+  { key: "image", label: "Fotoğraf", icon: "camera-outline", active: true },
   { key: "audio", label: "Ses kaydı", icon: "mic-outline", active: false },
   { key: "document", label: "Dosya", icon: "document-outline", active: false },
   { key: "link", label: "Link", icon: "link-outline", active: false },
@@ -22,6 +23,8 @@ const TYPES: { key: string; label: string; icon: IconName; active: boolean }[] =
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.code === "STORAGE_LIMIT") return "Depolama alanın doldu";
+    if (err.code === "IMAGE_TOO_LARGE") return "Fotoğraf çok büyük";
     return err.code === "NETWORK" || err.code === "TIMEOUT" ? "Bağlantı yok, not kaydedilemedi" : err.message;
   }
   return "Not kaydedilemedi, tekrar dene";
@@ -35,6 +38,7 @@ export default function CaptureScreen() {
   const now = useNow(); // the shown target refreshes once a minute while this sheet is open
   const schedule = useScheduleNow(now);
   const create = useCreateNote();
+  const createImage = useCreateImageNote();
 
   // A target the user chose by hand (or via "Not al" on a course) stays fixed; otherwise it follows the clock.
   const [manual, setManual] = useState<PickedTarget | null>(
@@ -43,6 +47,9 @@ export default function CaptureScreen() {
   const [picking, setPicking] = useState(false);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [type, setType] = useState<"text" | "image">("text");
+  const [photos, setPhotos] = useState<string[]>([]);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const manualCourse = manual?.courseId ? schedule.courses.find((c) => c._id === manual.courseId) : undefined;
   const target = manual
@@ -58,25 +65,83 @@ export default function CaptureScreen() {
       ? "Şu an derstesin, otomatik seçildi"
       : "Ders saati dışında, gelen kutusuna gider";
 
+  // Recomputed at save time, not at open time: opened at 08:45, saved at 09:05 -> the course.
+  function resolveTarget(): { courseId: string; weekNo: number } | { courseId: null; weekNo?: undefined } {
+    if (manual) {
+      return manual.courseId
+        ? { courseId: manual.courseId, weekNo: manual.weekNo ?? schedule.weekNo ?? 1 }
+        : { courseId: null };
+    }
+    const auto = findAutoTarget(schedule.semester, schedule.courses, new Date(), timeZone);
+    return auto ? { courseId: auto.course._id, weekNo: auto.weekNo } : { courseId: null };
+  }
+
+  const MAX_PHOTOS = 10;
+
+  function addPhotos(result: ImagePicker.ImagePickerResult) {
+    if (result.canceled) return;
+    setError(null);
+    setPhotos((prev) => [...prev, ...result.assets.map((a) => a.uri)].slice(0, MAX_PHOTOS));
+  }
+
+  // quality 0.7 compresses on the device; the server shrinks further (max 2000 px).
+  async function pickFromCamera() {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      setError("Kamera izni gerekli. Ayarlardan izin verebilirsin.");
+      return;
+    }
+    addPhotos(await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.7 }));
+  }
+
+  async function pickFromGallery() {
+    addPhotos(
+      await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: Math.max(1, MAX_PHOTOS - photos.length),
+        quality: 0.7,
+      }),
+    );
+  }
+
+  // One note per photo, uploaded one after another. Uploaded photos leave the list; a failure stops
+  // the batch and keeps the rest so "Kaydet" can be pressed again.
+  async function savePhotos() {
+    if (photos.length === 0 || createImage.isPending) return;
+    setError(null);
+    const target = resolveTarget();
+    const total = photos.length;
+    let done = 0;
+    for (const uri of [...photos]) {
+      setProgress({ done, total });
+      try {
+        await createImage.mutateAsync({ uri, target });
+      } catch (e) {
+        setProgress(null);
+        setError(errorText(e));
+        return;
+      }
+      done += 1;
+      setPhotos((prev) => prev.filter((p) => p !== uri));
+    }
+    setProgress(null);
+    router.back();
+  }
+
   function save() {
+    if (type === "image") return void savePhotos();
     if (!text.trim() || create.isPending) return;
     setError(null);
-    // Recomputed at save time, not at open time: opened at 08:45, saved at 09:05 -> the course.
-    const resolved = manual
-      ? manual.courseId
-        ? { courseId: manual.courseId, weekNo: manual.weekNo ?? schedule.weekNo ?? 1 }
-        : { courseId: null }
-      : (() => {
-          const auto = findAutoTarget(schedule.semester, schedule.courses, new Date(), timeZone);
-          return auto ? { courseId: auto.course._id, weekNo: auto.weekNo } : { courseId: null };
-        })();
+    const resolved = resolveTarget();
     create.mutate(
       { type: "text", markdown: text.trim(), ...resolved },
       { onSuccess: () => router.back(), onError: (e) => setError(errorText(e)) },
     );
   }
 
-  const canSave = text.trim().length > 0 && !create.isPending;
+  const busy = create.isPending || createImage.isPending;
+  const canSave = !busy && (type === "image" ? photos.length > 0 : text.trim().length > 0);
 
   return (
     <KeyboardAvoidingView className="flex-1 bg-bg" behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -126,28 +191,80 @@ export default function CaptureScreen() {
 
         <View className="flex-row flex-wrap gap-3">
           {TYPES.map((t) => (
-            <View
+            <Pressable
               key={t.key}
-              accessibilityState={{ disabled: !t.active, selected: t.active }}
+              disabled={!t.active || busy}
+              onPress={() => setType(t.key as "text" | "image")}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: !t.active, selected: t.active && type === t.key }}
               className={`min-h-[76px] items-center justify-center rounded-2xl border-2 px-2 ${
-                t.active ? "border-primary bg-primary-soft" : "border-transparent bg-line/50 opacity-60"
+                !t.active
+                  ? "border-transparent bg-line/50 opacity-60"
+                  : type === t.key
+                    ? "border-primary bg-primary-soft"
+                    : "border-line bg-card"
               }`}
               style={{ width: "31%" }}
             >
-              <Ionicons name={t.icon} size={24} color={t.active ? "#3730A3" : "#6B6B66"} />
-              <Text className={`mt-1 font-body-medium text-sm ${t.active ? "text-primary-dark" : "text-muted"}`}>{t.label}</Text>
+              <Ionicons name={t.icon} size={24} color={t.active && type === t.key ? "#3730A3" : "#6B6B66"} />
+              <Text className={`mt-1 font-body-medium text-sm ${t.active && type === t.key ? "text-primary-dark" : "text-muted"}`}>{t.label}</Text>
               {!t.active ? <Text className="font-body text-xs text-muted">yakında</Text> : null}
-            </View>
+            </Pressable>
           ))}
         </View>
 
+        {type === "image" ? (
+          <View className="gap-3">
+            <View className="flex-row gap-3">
+              <Pressable
+                onPress={pickFromCamera}
+                disabled={busy || photos.length >= MAX_PHOTOS}
+                accessibilityRole="button"
+                className="min-h-[56px] flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-card active:opacity-80"
+              >
+                <Ionicons name="camera-outline" size={22} color="#18181B" />
+                <Text className="font-body-semibold text-base text-ink">{photos.length ? "Bir tane daha" : "Kamera"}</Text>
+              </Pressable>
+              <Pressable
+                onPress={pickFromGallery}
+                disabled={busy || photos.length >= MAX_PHOTOS}
+                accessibilityRole="button"
+                className="min-h-[56px] flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-card active:opacity-80"
+              >
+                <Ionicons name="images-outline" size={22} color="#18181B" />
+                <Text className="font-body-semibold text-base text-ink">Galeri</Text>
+              </Pressable>
+            </View>
+            {photos.length > 0 ? (
+              <View className="flex-row flex-wrap gap-3">
+                {photos.map((uri) => (
+                  <View key={uri} className="h-24 w-24">
+                    <Image source={{ uri }} className="h-24 w-24 rounded-xl bg-line" resizeMode="cover" />
+                    <Pressable
+                      onPress={() => setPhotos((prev) => prev.filter((p) => p !== uri))}
+                      disabled={busy}
+                      accessibilityRole="button"
+                      accessibilityLabel="Fotoğrafı çıkar"
+                      hitSlop={8}
+                      className="absolute -right-2 -top-2 h-7 w-7 items-center justify-center rounded-full bg-ink"
+                    >
+                      <Ionicons name="close" size={16} color="#FFFFFF" />
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <Text className="font-body text-sm text-muted">Fotoğraf çek ya da galeriden seç; her fotoğraf ayrı bir not olur.</Text>
+            )}
+          </View>
+        ) : (
         <View>
           <Text className="mb-1 font-body-medium text-base text-ink">Not</Text>
           <TextInput
             value={text}
             onChangeText={setText}
             multiline
-            autoFocus
+            autoFocus={type === "text"}
             textAlignVertical="top"
             maxLength={20000}
             placeholder="Derste ne konuşuldu?"
@@ -155,6 +272,7 @@ export default function CaptureScreen() {
             className="min-h-[180px] rounded-2xl border border-line bg-card p-4 font-body text-base text-ink"
           />
         </View>
+        )}
 
         {error ? <Text className="font-body text-sm text-red-700">{error}</Text> : null}
       </ScrollView>
@@ -166,7 +284,7 @@ export default function CaptureScreen() {
           className={`min-h-[56px] items-center justify-center rounded-2xl ${canSave ? "bg-primary active:opacity-80" : "bg-line"}`}
         >
           <Text className={`font-body-semibold text-base ${canSave ? "text-white" : "text-muted"}`}>
-            {create.isPending ? "Kaydediliyor…" : "Kaydet"}
+            {progress ? `Yükleniyor ${Math.min(progress.done + 1, progress.total)}/${progress.total}…` : busy ? "Kaydediliyor…" : "Kaydet"}
           </Text>
         </Pressable>
       </View>

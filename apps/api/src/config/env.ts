@@ -12,6 +12,8 @@ const schema = z.object({
   // No default on purpose: check the current model names in the Gemini docs.
   GEMINI_MODEL: z.string().min(1, "GEMINI_MODEL is required"),
   // gemini-3.8-flash does not support MINIMAL; use LOW there.
+  // Per-user file storage cap (GridFS), in MB.
+  USER_STORAGE_LIMIT_MB: z.coerce.number().positive().default(200),
   GEMINI_THINKING_LEVEL: z.enum(["MINIMAL", "LOW"]).default("MINIMAL"),
 });
 

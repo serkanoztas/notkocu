@@ -1,8 +1,9 @@
 import { Router } from "express";
-import type { MeResponse } from "@notkocu/shared";
+import type { MeResponse, StorageUsageResponse } from "@notkocu/shared";
 import { requireAuth } from "../middleware/requireAuth";
 import { UserModel } from "../models";
 import { deleteUserData } from "../services/account";
+import { getUsage, storageLimitBytes } from "../services/files";
 import { AppError } from "../utils/AppError";
 import { asyncHandler } from "../utils/asyncHandler";
 import { toPublicUser } from "./auth";
@@ -15,6 +16,11 @@ meRouter.get("/", asyncHandler(async (req, res) => {
   const user = await UserModel.findById(req.userId);
   if (!user) throw new AppError(401, "Authentication required", "UNAUTHORIZED");
   const body: MeResponse = { user: toPublicUser(user) };
+  res.json(body);
+}));
+
+meRouter.get("/storage", asyncHandler(async (req, res) => {
+  const body: StorageUsageResponse = { usedBytes: await getUsage(req.userId), limitBytes: storageLimitBytes() };
   res.json(body);
 }));
 

@@ -32,15 +32,15 @@ Yığın tek bir Expo uygulaması ve onun konuştuğu bir Express API'den oluşu
 | Kimlik | Google ile giriş (`@react-native-google-signin`) + JWT | Sunucu Google ID token'ını (audience = Web client ID) doğrular; access token JWT (15 dk), refresh token opak ve tek kullanımlık (30 gün, DB'de SHA-256 hash'i, rotasyon + yeniden kullanım tespiti); token'lar `expo-secure-store`'da |
 | Veritabanı | MongoDB Atlas + Mongoose | Atlas Vector Search ileride RAG için |
 | AI | Gemini (metin, görsel, ses) + Gemini embedding | Structured output ile JSON |
-| Dosya depolama | S3 uyumlu depolama (örn. Cloudflare R2) | İmzalı URL ile telefondan doğrudan yükleme |
-| Arka plan işleri | BullMQ + Redis | OCR, transkript ve özet işleri |
+| Dosya depolama | MongoDB GridFS (mevcut Atlas, bucket `files`) | Telefondan API'ye multipart yükleme; gösterim auth'lu akış endpoint'i ile |
+| Arka plan işleri | MongoDB tabanlı kuyruk + ayrı worker süreci | OCR, transkript ve özet işleri; Redis/BullMQ yok |
 | Bildirim | Expo Push | İşleme bitti, görev hatırlatmaları |
 | PDF üretimi | PDFKit (sunucu) | pyb-ai-analysis'teki kod yeniden kullanılır |
 | Dağıtım | EAS Build + EAS Update | Mağaza derlemesi ve mağazaya uğramıyan hızlı güncelleme |
 
 **Expo Go ve dev build:** İlk aşamalar Expo Go ile test edilir (ilk test platformu Android, fiziksel cihaz). Expo Go'da çalışmayan parçalar dev build gerektirir ve ilgili aşamaya kadar eklenmez: `@react-native-google-signin` (Google ile giriş; `app.json`'da Firebase'siz varyant, `iosUrlScheme` yer tutucudur, iOS aşamasında gerçek değerle değişir), `expo-share-intent`, Android'de uzaktan push (`expo-notifications`), arka plan ses kaydı.
 
-Web olmadığı için Vercel'e gerek kalmaz. API ve worker aynı sunucuda (Railway ya da Render) iki ayrı süreç olarak çalışır, Redis de aynı platformdan alınır.
+Web olmadığı için Vercel'e gerek kalmaz. API ve worker aynı sunucuda (Railway ya da Render) iki ayrı süreç olarak çalışır; ikisi de yalnızca MongoDB'ye bağlanır, ek servis gerekmez.
 
 ## Veri modeli
 
@@ -80,7 +80,7 @@ Tipe özel `content` alanları:
 | --- | --- |
 | text | `markdown` |
 | document | `fileKey`, `mime`, `pageCount`, `pages[]` (sayfa başına metin) |
-| image | `fileKey`, `width`, `height`, `ocrMarkdown` |
+| image | `fileKey` (işlenmiş görsel), `thumbKey` (~200 px küçük resim, yoksa boş), `mime`, `width`, `height`, `ocrMarkdown` |
 | audio | `fileKey`, `durationSec`, `transcript[]` (zaman damgalı), `chapters[]` |
 | link | `url`, `siteTitle`, `thumbnail` |
 | task | `dueAt`, `remindAt`, `done` |
@@ -96,9 +96,9 @@ Yeni not eklendiğinde ilgili `WeekSummary.stale = true` olur. Özet bir sonraki
 
 Her not, tipi ne olursa olsun aynı hattan geçer ve sonunda `extractedText` alanına düz metin olarak yazılır. Haftalık özet, gelen kutusu önerisi ve ileride kurulacak RAG sohbeti tipe bakmadan yalnızca bu alanı okur.
 
-1. **Not oluşturulur:** dosya depoya yüklenir, `status: pending`
+1. **Not oluşturulur:** dosya GridFS'e yazılır, `status: pending`
 2. **Otomatik atama:** ders saatindeyse o haftaya, değilse gelen kutusuna
-3. **Kuyruğa eklenir:** worker işi alır, `status: processing`
+3. **Kuyruk:** `pending` not zaten iştir; worker onu atomik olarak alır, `status: processing`
 4. **Tipe göre işleme:** OCR, transkript, metin çıkarma (Gemini)
 5. **Sonuç kaydedilir:** `extractedText` + `aiSummary`, `status: ready`
 6. **Sonraki adımlar:** gelen kutusunda ders önerisi, haftalık özet yenilenir, push bildirimi gider
@@ -114,6 +114,19 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 | Link | Sayfa başlığı ve açıklaması çekilir, kısa özet yazılır | Başlık + özet |
 | Görev | Yok; `remindAt` için zamanlanmış push bildirimi kurulur | Başlık |
 | Kod | Yok | Kodun kendisi |
+
+**Aşama 4a'da uygulanan sapmalar (dosyalar, kuyruk, görsel notlar):**
+
+- **Depolama:** Cloudflare R2 yerine MongoDB GridFS. Yükleme imzalı URL ile değil, `POST /api/notes` multipart gövdesiyle API'ye yapılır. Her dosyanın `metadata.userId` alanı vardır; okuma, silme ve kullanım hesabı bu alanla sınırlıdır. Gösterim `GET /api/files/:id` (Bearer gerekir, başkasının dosyası 404, `Cache-Control: private`). `/api/uploads/sign` yazılmadı.
+- **Yükleme kuralları:** jpeg/png/webp/heic/heif, en fazla 10 MB, kullanıcı başına dakikada 20 yükleme. Dosya türü istemcinin söylediğine göre değil ilk baytlara bakılarak doğrulanır. `POST /api/notes` multipart alanları: `type=image`, `file`, `title?`, `courseId?` + `weekNo?`, `inbox=1` (açık gelen kutusu; multipart'ta `null` olmadığı için). Hiçbiri yoksa Aşama 3'teki otomatik atama çalışır. Her fotoğraf ayrı bir nottur; mobil çoklu seçimde sırayla yükler.
+- **Sunucuda görsel işleme (sharp, yalnızca API):** yazmadan önce EXIF yönüne göre döndürülür, uzun kenar en fazla 2000 px'e indirilir, JPEG kalite 80 olarak kaydedilir; ayrıca ~200 px küçük resim ayrı GridFS dosyası olarak `content.thumbKey`'e yazılır. sharp girdiyi çözemezse (özellikle HEIC) orijinal olduğu gibi saklanır, küçük resim üretilmez ve istemci `thumbKey ?? fileKey` kullanır. Listeler küçük resmi, not detayı büyük görseli gösterir; OCR işlenmiş görseli okur.
+- **Depolama sınırı:** kullanıcı başına `USER_STORAGE_LIMIT_MB` (varsayılan 200). Aşılırsa yükleme 413 `STORAGE_LIMIT` ile reddedilir. Sınır yumuşaktır: aynı anda gelen iki yükleme hafifçe aşabilir. `GET /api/me/storage` kullanılan ve toplam bayt sayısını döner; Ayarlar'da "23 MB / 200 MB" gösterilir.
+- **Kuyruk (MongoDB):** bekleyen not (`status: pending`) iştir; `NoteItem.job` alt dokümanı `attempts`, `deferrals`, `runAt`, `leaseUntil`, `lastError` tutar ve istemciye gönderilmez. Worker `findOneAndUpdate` ile `pending` ve vakti gelmiş notu (ya da lease'i dolmuş `processing` notu) alıp `processing` yapar, 3 dk lease verir ve `attempts`'i artırır. Başarıda `ready`; hatada 30 sn × deneme kadar bekleyip `pending`'e döner; 3. denemeden sonra `failed`. Sonuç yalnızca lease hâlâ worker'daysa yazılır (çift işleme koruması). Lease'i dolmuş ve 3 denemesi bitmiş kayıtlar worker'ın süpürme adımıyla `failed` olur. `POST /api/notes/:id/retry` yalnızca `failed` notu `pending`'e alır (aksi 409).
+- **Gemini 429/kota** deneme sayısını artırmaz: not `pending`'e ~60 sn sonrasına ertelenir (`deferrals` artar). Kota günlerce sürerse sonsuz döngü olmasın diye 30 ertelemeden sonra `failed` olur. Diğer hatalar 3 deneme kuralındadır.
+- **OCR:** `services/ai/imageOcr.ts`, program okuyucuyla aynı model/thinking ayarlarını ve `responseSchema`'yı kullanır (`markdown`, `title`, `summary`); yeniden deneme yalnızca kuyruktadır. Log'a yalnızca HTTP durumu yazılır. Sonuç `content.ocrMarkdown`, `extractedText` (metin yoksa özet) ve `aiSummary`'ye gider; başlık varsayılan "Fotoğraf" ise Gemini'nin önerdiği başlıkla değişir.
+- **Silme:** not silinince `fileKey` ve `thumbKey` dosyaları da silinir; `DELETE /api/me` kullanıcının tüm GridFS dosyalarını `metadata.userId` ile siler. Görsel notlarda metin düzenleme (`markdown` PATCH) 400 döner.
+- **Worker:** `npm run worker` (ayrı süreç, eşzamanlılık 2, SIGINT/SIGTERM'de düzgün kapanır). Kuyruk ve dosya mantığı `npm run check-queue`, uçtan uca HTTP akışı (worker açıkken) `npm run check-http` ile denenir.
+- **Mobil:** Hızlı yakalamada Fotoğraf aktif (kamera + galeri çoklu seçim, `quality: 0.7`, en fazla 10 fotoğraf). Hafta sayfası, gelen kutusu ve not detayı, `pending/processing` not varken 4 sn'de bir yeniden sorgular, hepsi `ready/failed` olunca durur. Görseller `Authorization` başlığıyla yüklenir (token süresi dolunca bir kez tazelenip yeniden denenir). Çevrimdışı önbellek yalnızca JSON'u saklar; görsel byte'ı Query verisine girmez (Android'in kendi görsel önbelleği uygulama kontrolünde değildir).
 
 **Haftalık özet:** Haftanın tüm `extractedText` alanları tek bir prompt'ta birleştirilir. Gemini, 3–5 cümlelik özet ve hangi notlardan beslendiğini döner. Uzun ses transkriptlerinde ham metin yerine notun kendi `aiSummary` alanı kullanılır; böylece prompt kısa kalır.
 
@@ -215,11 +228,13 @@ API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. `/api/health` ve 
 | PATCH | `/api/courses/:id` | Ders adı, rengi, oturumları düzenlenir |
 | GET | `/api/courses/:id/weeks/:no` | Haftanın notları ve özeti |
 | POST | `/api/courses/:id/weeks/:no/summary` | Haftalık özeti yeniden üretir |
-| POST | `/api/uploads/sign` | Dosya için imzalı yükleme URL'si verir |
-| POST | `/api/notes` | Not oluşturur; otomatik atamayı yapar, işleme işini kuyruğa atar |
+| GET | `/api/files/:id` | Kullanıcının kendi dosyasını (görsel ya da küçük resim) akıtır; başkasınınki 404 |
+| POST | `/api/notes` | Not oluşturur; otomatik atamayı yapar. Görsel için multipart (`file`), `pending` olarak kuyruğa girer |
+| POST | `/api/notes/:id/retry` | `failed` notu yeniden kuyruğa alır |
+| GET | `/api/me/storage` | Kullanılan ve izin verilen depolama alanı (bayt) |
 | GET | `/api/notes/:id` | Not detayı ve işleme durumu |
 | PATCH | `/api/notes/:id` | Düzenleme veya ders/hafta ataması |
-| DELETE | `/api/notes/:id` | Notu ve dosyasını siler |
+| DELETE | `/api/notes/:id` | Notu ve dosyalarını (görsel + küçük resim) siler |
 | GET | `/api/inbox` | Atanmamış notlar ve AI önerileri |
 | POST | `/api/inbox/approve` | Bir ya da birden çok öneriyi onaylar |
 | POST | `/api/export/pdf` | Not ya da hafta için PDF üretir, indirme linki döner |
@@ -249,7 +264,9 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
 2. [x] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
 3. [x] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
-4. [ ] **Dosyalar ve işleme:** kamera + dosya yükleme (depolama, imzalı URL); kuyruk + worker, OCR; gelen kutusu + AI ders önerisi; çevrimdışı not kuyruğu: not önce cihaza kaydedilir, bağlantı gelince gönderilir
+4. [ ] **Dosyalar ve işleme:**
+   - [ ] **4a:** görsel notlar (kamera/galeri), GridFS, Mongo kuyruğu + worker, Gemini OCR, depolama sınırı (kod ve API testleri tamam; Android cihaz testi bekliyor)
+   - [ ] **4b:** belge (PDF/PPTX/DOCX), gelen kutusu + AI ders önerisi, çevrimdışı not kuyruğu (not önce cihaza kaydedilir, bağlantı gelince gönderilir)
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test
 
@@ -272,7 +289,7 @@ Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomati
 | AI maliyeti | 1,5 saatlik ses kayıtlarının transkripti en pahalı iş | Kullanıcı başına aylık dakika limiti; Flash Lite modeli; kaydı parçalara bölüp işlemek |
 | Program okuma doğruluğu | OBS ekranı farklı çıktığında dersler yanlış okunabilir | Onay ekranı zorunlu; düşük güven vurgusu; gerçek örneklerle test |
 | Ses kaydı izni | Bazı hocalar kayda izin vermiyor | Kayıt öncesi "izin aldım" onayı; kayıtlar sadece kullanıcıya özel |
-| Kişisel veri (KVKK) | Ses ve görsellerde başkalarının sesi ya da yüzü olabilir | Dosyalar özel depoda ve imzalı URL ile; hesap silinince tüm veri siliniyor |
+| Kişisel veri (KVKK) | Ses ve görsellerde başkalarının sesi ya da yüzü olabilir | Dosyalar özel depoda (GridFS), yalnızca sahibine auth'lu akışla verilir; hesap silinince tüm veri ve dosyalar siliniyor |
 | Mobil arka plan kaydı | Uzun kayıtta iOS/Android uygulamayı durdurabilir | Expo dev build + arka plan ses izni; erken gerçek cihaz testi |
 | Zayıf bağlantı | Sınıfta internet kesilirse not ya da dosya kaybolabilir | Not önce telefona kaydedilir, yükleme kuyruğu bağlantı gelince devam eder |
 | Mağaza süreci | App Store incelemesi ve hesap ücreti (Apple yıllık 99 $) | Test için TestFlight ve Android dahili test; mağaza yayını MVP sonrasına |
@@ -282,5 +299,5 @@ Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomati
 - [ ] preview/production build aşamasında `EXPO_PUBLIC_API_URL` ve `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` EAS ortam değişkeni (`eas env:create`) olarak tanımlanacak; dev build'de Metro yerel `.env`'den okur.
 - [ ] Play Store öncesi: Play App Signing SHA-1'i için ikinci Android OAuth client; Ayarlar'a "Hesabı sil" butonu.
 - [ ] API ve worker için Railway mi Render mı kullanılacak?
-- [ ] Dosya depolama: Cloudflare R2 mi, MongoDB GridFS mi?
+- [x] Dosya depolama: MongoDB GridFS (Cloudflare R2 yok). Kuyruk: MongoDB tabanlı (Redis/BullMQ yok).
 - [x] İlk test hangi platformda yapılacak: Android, fiziksel cihaz, Expo Go (dev build native modül gereken aşamada)

@@ -3,16 +3,17 @@ import { useState } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NoteItem } from "@notkocu/shared";
+import { AuthImage } from "../../src/components/AuthImage";
 import { BackHeader } from "../../src/components/BackHeader";
 import { TargetPicker, type PickedTarget } from "../../src/components/TargetPicker";
-import { useDeleteNote, useNote, useUpdateNote } from "../../src/hooks/queries";
+import { useDeleteNote, useNote, useRetryNote, useUpdateNote } from "../../src/hooks/queries";
 import { useActiveSemester } from "../../src/hooks/useActiveSemester";
 import { useScheduleNow } from "../../src/hooks/useSchedule";
 import { useNow, useTimeZone } from "../../src/hooks/useNow";
 import { ApiError } from "../../src/lib/api";
 import { formatStamp } from "../../src/lib/format";
 
-const TYPE_EYEBROW = { text: "Metin notu" } as const;
+const TYPE_EYEBROW: Record<string, string> = { text: "Metin notu", image: "Fotoğraf notu" };
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.code === "NETWORK" || err.code === "TIMEOUT" ? "Bağlantı yok, işlem yapılamadı" : err.message;
@@ -29,6 +30,8 @@ export default function NoteScreen() {
   const schedule = useScheduleNow(useNow());
   const update = useUpdateNote(id);
   const remove = useDeleteNote(id);
+  const retry = useRetryNote(id);
+  const [aspect, setAspect] = useState(4 / 3);
 
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
@@ -89,7 +92,7 @@ export default function NoteScreen() {
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={{ paddingTop: insets.top + 12, paddingHorizontal: 20, paddingBottom: insets.bottom + 32, gap: 16 }}
       >
-        <BackHeader eyebrow={note ? TYPE_EYEBROW[note.type as "text"] ?? "Not" : undefined} title={editing ? "Notu düzenle" : note?.title || "Not"} />
+        <BackHeader eyebrow={note ? TYPE_EYEBROW[note.type] ?? "Not" : undefined} title={editing ? "Notu düzenle" : note?.title || "Not"} />
 
         {isPending ? <Text className="font-body text-base text-muted">Yükleniyor…</Text> : null}
         {isError && !note ? (
@@ -140,15 +143,57 @@ export default function NoteScreen() {
               </View>
             ) : (
               <>
-                <View className="rounded-2xl border border-line bg-card p-4">
-                  <Text selectable className="font-body text-base leading-6 text-ink">
-                    {markdown}
-                  </Text>
-                </View>
+                {note.type === "image" ? (
+                  <>
+                    <AuthImage
+                      fileId={note.content.fileKey}
+                      resizeMode="contain"
+                      onLoad={(s) => s.width && s.height && setAspect(s.width / s.height)}
+                      className="w-full rounded-2xl bg-line"
+                      style={{ aspectRatio: note.content.width && note.content.height ? note.content.width / note.content.height : aspect }}
+                    />
+                    {note.status === "pending" || note.status === "processing" ? (
+                      <View className="rounded-2xl border border-line bg-card p-4">
+                        <Text className="font-body text-base text-muted">İşleniyor…</Text>
+                      </View>
+                    ) : note.status === "failed" ? (
+                      <View className="rounded-2xl border border-red-200 bg-card p-4">
+                        <Text className="font-body-semibold text-base text-red-700">Fotoğraf işlenemedi</Text>
+                        <Pressable
+                          onPress={() => retry.mutate(undefined, { onError: (e) => setError(errorText(e)) })}
+                          disabled={retry.isPending}
+                          accessibilityRole="button"
+                          className="mt-3 min-h-touch justify-center self-start rounded-xl border border-line bg-white px-4"
+                        >
+                          <Text className="font-body-medium text-base text-ink">{retry.isPending ? "Gönderiliyor…" : "Tekrar dene"}</Text>
+                        </Pressable>
+                      </View>
+                    ) : (
+                      <View className="gap-3 rounded-2xl border border-line bg-card p-4">
+                        {note.aiSummary ? (
+                          <Text selectable className="font-body-medium text-base leading-6 text-ink">
+                            {note.aiSummary}
+                          </Text>
+                        ) : null}
+                        <Text selectable className="font-body text-base leading-6 text-ink">
+                          {note.content.ocrMarkdown || "Fotoğrafta okunacak metin bulunamadı."}
+                        </Text>
+                      </View>
+                    )}
+                  </>
+                ) : (
+                  <View className="rounded-2xl border border-line bg-card p-4">
+                    <Text selectable className="font-body text-base leading-6 text-ink">
+                      {markdown}
+                    </Text>
+                  </View>
+                )}
                 <View className="flex-row flex-wrap gap-3">
-                  <Pressable onPress={() => startEdit(note)} className="min-h-touch justify-center rounded-xl border border-line bg-card px-5">
-                    <Text className="font-body-medium text-base text-ink">Düzenle</Text>
-                  </Pressable>
+                  {note.type === "text" ? (
+                    <Pressable onPress={() => startEdit(note)} className="min-h-touch justify-center rounded-xl border border-line bg-card px-5">
+                      <Text className="font-body-medium text-base text-ink">Düzenle</Text>
+                    </Pressable>
+                  ) : null}
                   <Pressable onPress={() => setPicking(true)} className="min-h-touch justify-center rounded-xl border border-line bg-card px-5">
                     <Text className="font-body-medium text-base text-ink">Yerini değiştir</Text>
                   </Pressable>

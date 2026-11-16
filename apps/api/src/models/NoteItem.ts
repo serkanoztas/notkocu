@@ -9,6 +9,18 @@ const suggestionSchema = new Schema(
   { _id: false },
 );
 
+// Queue bookkeeping for the worker (never sent to clients, see serializeNote).
+const jobSchema = new Schema(
+  {
+    attempts: { type: Number, default: 0 }, // claims that ended in failure or are running; max 3
+    deferrals: { type: Number, default: 0 }, // quota (429) postponements; they do not count as attempts
+    runAt: { type: Date, default: () => new Date() },
+    leaseUntil: Date,
+    lastError: String,
+  },
+  { _id: false },
+);
+
 const noteItemSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -32,6 +44,7 @@ const noteItemSchema = new Schema(
       enum: ["pending", "processing", "ready", "failed"],
       default: "pending",
     },
+    job: { type: jobSchema, default: () => ({}) },
     source: { type: String, enum: ["app", "share-intent"], default: "app" },
     tags: { type: [String], default: [] },
   },
@@ -41,5 +54,9 @@ const noteItemSchema = new Schema(
 // Week page, and inbox (courseId: null) via the same index.
 noteItemSchema.index({ userId: 1, courseId: 1, weekNo: 1, createdAt: -1 });
 noteItemSchema.index({ userId: 1, courseId: 1, createdAt: -1 });
+
+// Worker queue: pending notes by runAt, processing notes by lease.
+noteItemSchema.index({ status: 1, "job.runAt": 1 });
+noteItemSchema.index({ status: 1, "job.leaseUntil": 1 });
 
 export const NoteItemModel = model("NoteItem", noteItemSchema);

@@ -68,7 +68,9 @@ export function titleFromMarkdown(markdown: string): string {
 
 /** Document/lean object -> API shape (ObjectId/Date become strings, matching the shared types). */
 export function serializeNote(doc: unknown): NoteItem {
-  return JSON.parse(JSON.stringify(doc)) as NoteItem;
+  const note = JSON.parse(JSON.stringify(doc)) as NoteItem & { job?: unknown };
+  delete note.job; // queue bookkeeping stays on the server
+  return note;
 }
 
 export const toObjectId = (id: string) => new mongoose.Types.ObjectId(id);

@@ -75,7 +75,11 @@ export interface DocumentContent {
   pages?: string[];
 }
 export interface ImageContent {
+  /** GridFS file id of the (processed) image; GET /api/files/:id. */
   fileKey: string;
+  /** ~200 px thumbnail; absent when the server could not decode the image (e.g. HEIC). */
+  thumbKey?: string;
+  mime?: string;
   width?: number;
   height?: number;
   ocrMarkdown?: string;
@@ -204,6 +208,11 @@ export type CourseWithSessions = Course & { sessions: Session[] };
 export interface ActiveSemesterResponse {
   semester: Semester | null;
   courses: CourseWithSessions[];
+}
+
+export interface StorageUsageResponse {
+  usedBytes: number;
+  limitBytes: number;
 }
 
 export interface HealthResponse {

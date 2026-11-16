@@ -28,8 +28,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Ders programı görselini seçebilmek için fotoğraflarına erişim gerekir.",
-          "cameraPermission": "Ders programının fotoğrafını çekebilmek için kamera erişimi gerekir."
+          "photosPermission": "Ders programını ve not fotoğraflarını seçebilmek için fotoğraflarına erişim gerekir.",
+          "cameraPermission": "Ders programının ve notların fotoğrafını çekebilmek için kamera erişimi gerekir."
         }
       ],
       [
