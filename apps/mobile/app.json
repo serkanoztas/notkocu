@@ -38,7 +38,16 @@
           "iosUrlScheme": "com.googleusercontent.apps.notkocu-ios-placeholder"
         }
       ],
-      "expo-dev-client"
+      "expo-dev-client",
+      "expo-sharing",
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": ["text/*", "image/*", "*/*"],
+          "androidMultiIntentFilters": ["image/*", "*/*"],
+          "disableIOS": true
+        }
+      ]
     ],
     "scheme": "notkocu",
     "platforms": [

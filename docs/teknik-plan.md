@@ -128,6 +128,12 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Worker:** `npm run worker` (ayrı süreç, eşzamanlılık 2, SIGINT/SIGTERM'de düzgün kapanır). Kuyruk ve dosya mantığı `npm run check-queue`, uçtan uca HTTP akışı (worker açıkken) `npm run check-http` ile denenir.
 - **Mobil:** Hızlı yakalamada Fotoğraf aktif (kamera + galeri çoklu seçim, `quality: 0.7`, en fazla 10 fotoğraf). Hafta sayfası, gelen kutusu ve not detayı, `pending/processing` not varken 4 sn'de bir yeniden sorgular, hepsi `ready/failed` olunca durur. Görseller `Authorization` başlığıyla yüklenir (token süresi dolunca bir kez tazelenip yeniden denenir). Çevrimdışı önbellek yalnızca JSON'u saklar; görsel byte'ı Query verisine girmez (Android'in kendi görsel önbelleği uygulama kontrolünde değildir).
 
+**Aşama 4b'de alınan kararlar (uygulandıkça "uygulanan sapmalar" olarak genişler):**
+
+- **Native paketler tek dev build'de:** `expo-document-picker` (belge seçimi), `expo-sharing` (belgeyi cihazdaki uygulamayla açma), `expo-share-intent` (Paylaş → NotKoçu). Bilerek eklenmeyenler: `expo-network` (bağlantı `/api/health` + AppState + zamanlayıcı ile anlaşılır), `expo-background-task` (Android'de ~15 dk ve güvenilmez; outbox ön plana gelince ve ön plandayken periyodik dener), `expo-crypto` (`clientId` için benzersizlik yeter, güvenlik gerekmez).
+- **expo-share-intent yapılandırması:** eklentinin Android filtreleri yalnızca `text/*`, `image/*`, `video/*`, `*/*` kabul eder (PDF/DOCX/PPTX için ayrı MIME verilemez), bu yüzden `*/*` kullanılır ve desteklenmeyen dosya türü uygulamada reddedilir. iOS share extension'ı bu aşamada `disableIOS: true` ile kapalıdır; iOS aşamasında açılır (bundle id / Apple team gerekir).
+- **Sunucu kütüphaneleri (native değil):** `unpdf` (PDF metin katmanı), `pdf-lib` (taranmış PDF'i parçalara bölme), `fflate` (zip, boyut sınırlı) ve `fast-xml-parser` (DOCX/PPTX XML). LibreOffice kullanılmaz.
+
 **Haftalık özet:** Haftanın tüm `extractedText` alanları tek bir prompt'ta birleştirilir. Gemini, 3–5 cümlelik özet ve hangi notlardan beslendiğini döner. Uzun ses transkriptlerinde ham metin yerine notun kendi `aiSummary` alanı kullanılır; böylece prompt kısa kalır.
 
 ## Ders programı içe aktarma
