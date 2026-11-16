@@ -26,6 +26,7 @@ Bir işe başlamadan önce ilgili bölümü oku:
 - Gemini çağrıları `apps/api/src/services/ai/` altında toplanır. JSON beklenen her yerde `responseSchema` kullanılır.
 - Uzun işler (OCR, ses, özet) asla istek içinde yapılmaz; kuyruğa atılır, not `pending` → `processing` → `ready | failed` durumlarından geçer.
 - Sırlar `.env` dosyasında tutulur, repoya girmez. `.env.example` güncel tutulur.
+- `.env` dosyaları ve `docs/ornekler` okunmaz; yeni env değişkeni gerekiyorsa `.env.example`'a ekle ve bana söyle.
 - Web yalnızca geliştirme sırasında hızlı önizleme içindir. Web'e özel kod, ekran ya da düzeltme yazılmaz; bir özellik webde çalışmıyorsa sorun sayılmaz. Her aşama Android cihazda test edilir.
 
 ## Tasarım
