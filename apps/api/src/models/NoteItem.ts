@@ -21,6 +21,20 @@ const jobSchema = new Schema(
   { _id: false },
 );
 
+// Second, independent queue lane: "which course does this inbox note belong to?". It never touches
+// `status`, so an inbox text note does not show up as "processing" in the app.
+const suggestJobSchema = new Schema(
+  {
+    state: { type: String, enum: ["pending", "processing", "done"], default: "pending" },
+    attempts: { type: Number, default: 0 },
+    deferrals: { type: Number, default: 0 },
+    runAt: { type: Date, default: () => new Date() },
+    leaseUntil: Date,
+    lastError: String,
+  },
+  { _id: false },
+);
+
 const noteItemSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -45,6 +59,9 @@ const noteItemSchema = new Schema(
       default: "pending",
     },
     job: { type: jobSchema, default: () => ({}) },
+    suggestJob: { type: suggestJobSchema },
+    // When the note was actually taken (the outbox may deliver it later); createdAt follows it.
+    capturedAt: Date,
     source: { type: String, enum: ["app", "share-intent"], default: "app" },
     tags: { type: [String], default: [] },
   },
@@ -58,5 +75,6 @@ noteItemSchema.index({ userId: 1, courseId: 1, createdAt: -1 });
 // Worker queue: pending notes by runAt, processing notes by lease.
 noteItemSchema.index({ status: 1, "job.runAt": 1 });
 noteItemSchema.index({ status: 1, "job.leaseUntil": 1 });
+noteItemSchema.index({ "suggestJob.state": 1, "suggestJob.runAt": 1 });
 
 export const NoteItemModel = model("NoteItem", noteItemSchema);

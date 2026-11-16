@@ -68,8 +68,13 @@ export function titleFromMarkdown(markdown: string): string {
 
 /** Document/lean object -> API shape (ObjectId/Date become strings, matching the shared types). */
 export function serializeNote(doc: unknown): NoteItem {
-  const note = JSON.parse(JSON.stringify(doc)) as NoteItem & { job?: unknown };
-  delete note.job; // queue bookkeeping stays on the server
+  const note = JSON.parse(JSON.stringify(doc)) as NoteItem & { job?: unknown; suggestJob?: { state?: string } };
+  // Queue bookkeeping stays on the server; the app only learns whether a suggestion is still being prepared.
+  if (note.suggestJob) {
+    note.suggesting = note.suggestJob.state === "pending" || note.suggestJob.state === "processing";
+  }
+  delete note.job;
+  delete note.suggestJob;
   return note;
 }
 

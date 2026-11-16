@@ -10,7 +10,8 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import { createApp } from "../src/app";
 import { env } from "../src/config/env";
-import { NoteItemModel } from "../src/models";
+import { semesterWeekNo } from "@notkocu/shared";
+import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
 import { ocrPdfPages } from "../src/services/ai/documentOcr";
 import { deleteUserFiles, getUsage } from "../src/services/files";
 import { signAccessToken } from "../src/services/auth/tokens";
@@ -34,6 +35,8 @@ const userB = new mongoose.Types.ObjectId().toHexString();
 async function cleanup() {
   await worker?.stop();
   await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
 }
@@ -209,6 +212,65 @@ async function main() {
         job?.status === "pending" && job.job?.attempts === 0 && job.job.deferrals === 1 && +job.job.runAt! - Date.now() > 50_000,
         JSON.stringify(job?.job),
       );
+    }
+
+    // --- inbox course suggestions (the course's own week comes from the note date, not from the AI) ---
+    const monday = new Date();
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    monday.setUTCHours(12, 0, 0, 0);
+    const semester = await SemesterModel.create({ userId: userA, name: "Test Güz", startDate: monday, weekCount: 14, isActive: true });
+    const vtCourse = await CourseModel.create({ userId: userA, semesterId: semester._id, code: "YBS-301", name: "Veritabanı Yönetim Sistemleri", instructor: "Dr. Test" });
+    await CourseModel.create({ userId: userA, semesterId: semester._id, code: "YBS-305", name: "Sistem Analizi ve Tasarımı" });
+    const expectedWeek = semesterWeekNo({ startDate: monday.toISOString(), weekCount: 14 }, new Date());
+
+    const postText = async (markdown: string) => {
+      const r = await jsonPost(tokenA, { type: "text", markdown, courseId: null });
+      return ((await r.json()) as { note: { _id: string; suggesting?: boolean } }).note;
+    };
+    const getInbox = async (token = tokenA) =>
+      ((await (await fetch(`${base}/api/inbox`, { headers: auth(token) })).json()) as {
+        notes: { _id: string; suggesting?: boolean; suggestion?: { courseId: string; weekNo: number; confidence: number } }[];
+      }).notes;
+    const waitSuggestion = async (id: string, want: boolean) => {
+      for (let i = 0; i < 40; i++) {
+        const n = (await getInbox()).find((x) => x._id === id);
+        if (n && !n.suggesting && !!n.suggestion === want) return n;
+        await sleep(500);
+      }
+      return (await getInbox()).find((x) => x._id === id);
+    };
+
+    const vtNote = await postText("Normalizasyon: birinci normal formda her hücrede tek değer olmalıdır. İndeksleme B-tree ile yapılır.");
+    check("new inbox text note is marked as being suggested", vtNote.suggesting === true);
+    const suggested = await waitSuggestion(vtNote._id, true);
+    check(
+      "suggestion: the right course, week from the note date",
+      suggested?.suggestion?.courseId === String(vtCourse._id) && suggested.suggestion.weekNo === expectedWeek && suggested.suggestion.confidence >= 0.7,
+      JSON.stringify(suggested?.suggestion),
+    );
+
+    const approveAs = async (token: string, noteIds: string[]) => {
+      const r = await fetch(`${base}/api/inbox/approve`, { method: "POST", headers: { ...auth(token), "Content-Type": "application/json" }, body: JSON.stringify({ noteIds }) });
+      return { status: r.status, body: (await r.json()) as { approved: string[]; skipped: string[] } };
+    };
+    const other = await approveAs(tokenB, [vtNote._id]);
+    check("another user cannot approve my note (skipped)", other.status === 200 && other.body.approved.length === 0 && other.body.skipped.length === 1);
+    // Inserted directly (no queue entry), so it deterministically has no suggestion.
+    const noSuggestionYet = await NoteItemModel.create({ userId: userA, courseId: null, type: "text", title: "kısa", content: { markdown: "kısa" }, extractedText: "kısa", status: "ready" });
+    const mixed = await approveAs(tokenA, [vtNote._id, String(noSuggestionYet._id), "bogus"]);
+    check("approve assigns only notes that have a suggestion", mixed.body.approved.length === 1 && mixed.body.approved[0] === vtNote._id && mixed.body.skipped.length === 2, JSON.stringify(mixed.body));
+    let after = ((await (await fetch(`${base}/api/notes/${vtNote._id}`, { headers: auth(tokenA) })).json()) as { note: { courseId: string | null; weekNo?: number; suggestion?: unknown } }).note;
+    check("approved note sits in the course and week", after.courseId === String(vtCourse._id) && after.weekNo === expectedWeek);
+    res = await fetch(`${base}/api/notes/${vtNote._id}`, { method: "PATCH", headers: { ...auth(tokenA), "Content-Type": "application/json" }, body: JSON.stringify({ courseId: null }) });
+    after = ((await res.json()) as { note: typeof after }).note;
+    check("undo (back to the inbox) keeps the suggestion", after.courseId === null && !!after.suggestion);
+
+    if (gemini) {
+      gemini.setSuggestConfidence(0.4);
+      const unsure = await postText("Final projesi grupları cuma gününe kadar belli olmalı, 3-4 kişilik.");
+      const unsureNow = await waitSuggestion(unsure._id, false);
+      check("confidence < 0.7 -> no suggestion shown", !!unsureNow && !unsureNow.suggestion && !unsureNow.suggesting);
+      gemini.setSuggestConfidence(0.9);
     }
 
     // Large-file path: same PDF through the Files API (and deleted at the provider afterwards).

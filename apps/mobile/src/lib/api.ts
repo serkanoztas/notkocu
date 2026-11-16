@@ -1,5 +1,6 @@
 import type {
   ActiveSemesterResponse,
+  ApproveSuggestionsResponse,
   AuthResponse,
   ConfirmScheduleRequest,
   CourseDetailResponse,
@@ -161,6 +162,8 @@ export const api = {
     form.append("file", new File(fileUri) as unknown as Blob);
     return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: kind === "document" ? 120000 : 60000 });
   },
+  approveSuggestions: (noteIds: string[]) =>
+    request<ApproveSuggestionsResponse>("/api/inbox/approve", { method: "POST", body: { noteIds }, timeoutMs: 15000 }),
   retryNote: (id: string) => request<NoteResponse>(`/api/notes/${id}/retry`, { method: "POST", timeoutMs: 15000 }),
   storage: () => request<StorageUsageResponse>("/api/me/storage"),
   today: () => request<TodayResponse>("/api/today"),

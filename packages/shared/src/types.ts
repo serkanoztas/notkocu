@@ -127,10 +127,14 @@ interface NoteItemBase {
   courseId: Id | null;
   weekNo?: number;
   sessionId?: Id;
+  /** When the note was actually taken (an outbox note may reach the server later); createdAt follows it. */
+  capturedAt?: ISODate;
   title: string;
   extractedText?: string;
   aiSummary?: string;
   suggestion?: NoteSuggestion;
+  /** Inbox notes: an AI course suggestion is still being prepared. */
+  suggesting?: boolean;
   status: NoteStatus;
   source: NoteSource;
   tags: string[];
@@ -261,6 +265,17 @@ export interface UpdateNoteRequest {
 
 export interface NoteResponse {
   note: NoteItem;
+}
+
+export interface ApproveSuggestionsRequest {
+  noteIds: Id[];
+}
+
+export interface ApproveSuggestionsResponse {
+  /** Inbox notes that were assigned to their suggested course and week. */
+  approved: Id[];
+  /** Not in the inbox, no suggestion, or the suggestion no longer fits. */
+  skipped: Id[];
 }
 
 export interface InboxResponse {

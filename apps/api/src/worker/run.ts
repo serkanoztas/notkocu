@@ -3,6 +3,8 @@ import { processDocument } from "../services/documents/process";
 import { readFile } from "../services/files";
 import { markWeeksStale } from "../services/notes";
 import { claimNext, complete, defer, fail, sweepExhausted, type ClaimedNote } from "../services/queue";
+import { processSuggest } from "../services/suggest";
+import { claimNextSuggest, enqueueSuggest, sweepSuggest } from "../services/suggestQueue";
 
 // The job loops, without any process-level side effects, so the check scripts can run them in-process.
 // The real entry point (connect, signals) is worker/index.ts.
@@ -50,7 +52,10 @@ async function processNote(note: ClaimedNote): Promise<void> {
     if (note.type === "image") saved = await processImageNote(note);
     else if (note.type === "document") saved = await processDocumentNote(note);
     else throw new OcrError("UNSUPPORTED_TYPE");
-    if (saved) await markWeeksStale(String(note.userId), [note]);
+    if (saved) {
+      await markWeeksStale(String(note.userId), [note]);
+      await enqueueSuggest(note._id); // inbox notes now have text to suggest a course from
+    }
   } catch (err) {
     if (err instanceof QuotaError) return defer(note);
     const code = err instanceof OcrError ? err.code : "INTERNAL";
@@ -76,13 +81,20 @@ export function startWorker(opts: WorkerOptions): { stop: () => Promise<void> } 
         if (index === 0 && Date.now() - lastSweep > SWEEP_EVERY_MS) {
           lastSweep = Date.now();
           await sweepExhausted();
+          await sweepSuggest();
         }
+        // Processing (OCR, text extraction) first; course suggestions only when nothing else is waiting.
         const note = await claimNext(opts.claimFilter);
-        if (!note) {
-          await sleep(IDLE_MS);
+        if (note) {
+          await processNote(note);
           continue;
         }
-        await processNote(note);
+        const toSuggest = await claimNextSuggest(opts.claimFilter);
+        if (toSuggest) {
+          await processSuggest(toSuggest);
+          continue;
+        }
+        await sleep(IDLE_MS);
       } catch (err) {
         console.error("Worker loop error:", (err as Error).message);
         await sleep(IDLE_MS);

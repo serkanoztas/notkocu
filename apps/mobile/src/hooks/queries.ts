@@ -5,7 +5,7 @@ import { api, type PhotoTarget } from "../lib/api";
 /** Notes still being processed by the worker: the screen polls every few seconds until none are left. */
 const POLL_MS = 4000;
 const isActive = (notes: NoteItem[] | undefined) =>
-  !!notes?.some((n) => n.status === "pending" || n.status === "processing");
+  !!notes?.some((n) => n.status === "pending" || n.status === "processing" || n.suggesting);
 
 export const useToday = () => useQuery({ queryKey: ["today"], queryFn: api.today });
 
@@ -82,6 +82,24 @@ export function useAssignNote() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateNoteRequest }) => api.updateNote(id, body),
+    onSuccess: () => invalidateNoteViews(queryClient),
+  });
+}
+
+/** "Hepsini onayla" / "Onayla": assigns inbox notes to their AI-suggested course and week. */
+export function useApproveSuggestions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (noteIds: string[]) => api.approveSuggestions(noteIds),
+    onSuccess: () => invalidateNoteViews(queryClient),
+  });
+}
+
+/** "Geri al": puts notes back into the inbox. */
+export function useUndoAssign() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (noteIds: string[]) => Promise.all(noteIds.map((id) => api.updateNote(id, { courseId: null }))),
     onSuccess: () => invalidateNoteViews(queryClient),
   });
 }

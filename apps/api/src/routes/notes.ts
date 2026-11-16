@@ -10,6 +10,7 @@ import { sniffDocument } from "../services/documents/sniff";
 import { DOCUMENT_MIME } from "../services/documents/types";
 import { processImage, sniffImageMime } from "../services/imageProcess";
 import { requeue } from "../services/queue";
+import { enqueueSuggest } from "../services/suggestQueue";
 import {
   assertId,
   assertManualTarget,
@@ -263,7 +264,9 @@ notesRouter.post(
             source: "app",
           });
     await markWeeksStale(userId, [note]);
-    const out: NoteResponse = { note: serializeNote(note.toJSON()) };
+    await enqueueSuggest(note._id); // text and links in the inbox get a course suggestion right away
+    const fresh = await NoteItemModel.findById(note._id);
+    const out: NoteResponse = { note: serializeNote((fresh ?? note).toJSON()) };
     res.status(201).json(out);
   }),
 );
@@ -291,6 +294,8 @@ notesRouter.patch(
     if (body.markdown !== undefined) {
       note.content = { markdown: body.markdown };
       note.extractedText = body.markdown;
+      note.set("suggestion", undefined); // the old suggestion was for the old text
+      note.set("suggestJob", undefined);
     }
     if (body.title !== undefined) {
       note.title = body.title || titleFromMarkdown(body.markdown ?? note.extractedText ?? "");
@@ -303,11 +308,14 @@ notesRouter.patch(
       await assertManualTarget(userId, body.courseId, body.weekNo!);
       note.set({ courseId: body.courseId, weekNo: body.weekNo });
       note.sessionId = undefined; // assigned by hand, not by a session
+      note.set("suggestion", undefined); // a hand-picked course replaces any AI suggestion
     }
 
     await note.save();
     await markWeeksStale(userId, [before, note]);
-    const out: NoteResponse = { note: serializeNote(note.toJSON()) };
+    if (note.courseId === null) await enqueueSuggest(note._id); // back in the inbox (undo / edit): suggest again if none is kept
+    const fresh = await NoteItemModel.findById(note._id);
+    const out: NoteResponse = { note: serializeNote((fresh ?? note).toJSON()) };
     res.json(out);
   }),
 );

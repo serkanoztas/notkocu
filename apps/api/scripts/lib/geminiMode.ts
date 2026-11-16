@@ -9,6 +9,8 @@ export interface FakeGemini {
   calls: () => number;
   /** Next generateContent call fails with this HTTP status (e.g. 429) once. */
   failNextWith: (status: number) => void;
+  /** Confidence the fake reports for course suggestions (default 0.9). */
+  setSuggestConfidence: (c: number) => void;
 }
 
 interface Params {
@@ -25,6 +27,7 @@ export function setupGemini(): FakeGemini | null {
 
   let calls = 0;
   let failWith: number | undefined;
+  let suggestConfidence = 0.9;
 
   const answer = (p: Params): unknown => {
     const props = p.config?.responseSchema?.properties ?? {};
@@ -43,7 +46,7 @@ export function setupGemini(): FakeGemini | null {
     if ("courseId" in props) {
       // Course suggestion: pick the first real course id offered in the enum, confident.
       const ids = (props.courseId?.enum ?? []).filter((id) => id !== "none");
-      return { courseId: ids[0] ?? "none", confidence: 0.9 };
+      return { courseId: ids[0] ?? "none", confidence: suggestConfidence };
     }
     if ("summary" in props) return { summary: "Sahte özet: belge kısa bir ders içeriğini anlatır." };
     return {};
@@ -68,5 +71,5 @@ export function setupGemini(): FakeGemini | null {
     },
   };
   setGeminiOverride(fake);
-  return { calls: () => calls, failNextWith: (s) => (failWith = s) };
+  return { calls: () => calls, failNextWith: (s) => (failWith = s), setSuggestConfidence: (c) => (suggestConfidence = c) };
 }

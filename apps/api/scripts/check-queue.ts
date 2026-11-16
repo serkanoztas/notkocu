@@ -3,13 +3,17 @@
 import mongoose from "mongoose";
 import sharp from "sharp";
 import { env } from "../src/config/env";
-import { NoteItemModel } from "../src/models";
+import { semesterWeekNo } from "@notkocu/shared";
+import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
+import { processSuggest } from "../src/services/suggest";
+import { claimNextSuggest, completeSuggest, deferSuggest, enqueueSuggest, failSuggest, sweepSuggest } from "../src/services/suggestQueue";
 import { setupGemini } from "./lib/geminiMode";
 
-setupGemini(); // this script never asks Gemini anything; the fake only guarantees that by default
+// Queue and suggestion lanes only; with the fake (default) no real Gemini request is ever made.
+const gemini = setupGemini();
 let failures = 0;
 function check(name: string, ok: boolean) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
@@ -22,6 +26,8 @@ const userB = new mongoose.Types.ObjectId().toHexString();
 /** Removes everything this script created. Also runs when the script is interrupted or timed out. */
 async function cleanup() {
   await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
 }
@@ -38,6 +44,8 @@ async function main() {
   // claimNext takes any due image note, so never run this against a database with real jobs waiting.
   const waiting = await NoteItemModel.countDocuments({ type: "image", status: { $in: ["pending", "processing"] } });
   if (waiting > 0) throw new Error(`${waiting} real image job(s) are waiting; aborting`);
+  const suggestWaiting = await NoteItemModel.countDocuments({ "suggestJob.state": { $in: ["pending", "processing"] } });
+  if (suggestWaiting > 0) throw new Error(`${suggestWaiting} real suggestion job(s) are waiting; aborting`);
   try {
     // --- sharp + files ---
     const big = await sharp({ create: { width: 3000, height: 1500, channels: 3, background: "#336699" } })
@@ -118,6 +126,102 @@ async function main() {
     await NoteItemModel.updateOne({ _id: n2._id }, { status: "processing", "job.attempts": 3, "job.leaseUntil": new Date(Date.now() - 1000) });
     await sweepExhausted();
     check("sweep fails exhausted expired leases", (await NoteItemModel.findById(n2._id))?.status === "failed");
+
+    // --- suggestion lane (own block: it reuses names of the queue checks above) ---
+    {
+    const mine = { userId: { $in: [userA, userB] } }; // the lane claim is limited to our own notes
+    const textNote = (extra: Record<string, unknown> = {}) =>
+      NoteItemModel.create({ userId: userA, courseId: null, type: "text", title: "Not", content: { markdown: "x" }, extractedText: "Normalizasyon ve indeksleme", status: "ready", ...extra });
+
+    const s1 = await textNote();
+    check("a text note is not a processing job", (await claimNext().then((c) => c && String(c._id) === String(s1._id))) !== true);
+    await enqueueSuggest(s1._id);
+    const s1doc = await NoteItemModel.findById(s1._id);
+    check("enqueue: pending suggest job, status untouched", s1doc?.suggestJob?.state === "pending" && s1doc.status === "ready");
+
+    const inCourse = await textNote({ courseId: new mongoose.Types.ObjectId(), weekNo: 2 });
+    const hasSuggestion = await textNote({ suggestion: { courseId: new mongoose.Types.ObjectId(), weekNo: 1, confidence: 0.9 } });
+    const empty = await textNote({ extractedText: "" });
+    await Promise.all([inCourse, hasSuggestion, empty].map((n) => enqueueSuggest(n._id)));
+    const queued = await NoteItemModel.countDocuments({ _id: { $in: [inCourse._id, hasSuggestion._id, empty._id] }, suggestJob: { $exists: true } });
+    check("not enqueued: assigned, already suggested, or no text", queued === 0);
+
+    const [g1, g2] = await Promise.all([claimNextSuggest(mine), claimNextSuggest(mine)]);
+    const got = [g1, g2].filter(Boolean);
+    check("two concurrent suggest claims: exactly one wins", got.length === 1 && String(got[0]!._id) === String(s1._id) && got[0]!.suggestJob?.attempts === 1);
+
+    await failSuggest(got[0]!, "AI_500");
+    let sj = (await NoteItemModel.findById(s1._id))?.suggestJob;
+    check("1st suggest failure -> pending with backoff", sj?.state === "pending" && +sj.runAt! > Date.now());
+    await NoteItemModel.updateOne({ _id: s1._id }, { "suggestJob.runAt": new Date(Date.now() - 1000) });
+    const again = (await claimNextSuggest(mine))!;
+    await deferSuggest(again);
+    sj = (await NoteItemModel.findById(s1._id))?.suggestJob;
+    check("quota defer: attempts unchanged, ~60 s", sj?.state === "pending" && sj.attempts === 1 && sj.deferrals === 1 && +sj.runAt! - Date.now() > 50_000);
+
+    await NoteItemModel.updateOne({ _id: s1._id }, { "suggestJob.runAt": new Date(Date.now() - 1000), "suggestJob.attempts": 2 });
+    const third = (await claimNextSuggest(mine))!;
+    await failSuggest(third, "AI_500");
+    const s1end = await NoteItemModel.findById(s1._id);
+    check("3 failed attempts -> done silently, no suggestion", s1end?.suggestJob?.state === "done" && !s1end.suggestion);
+
+    const s2 = await textNote();
+    await enqueueSuggest(s2._id);
+    const c2 = (await claimNextSuggest(mine))!;
+    await completeSuggest(c2, { courseId: String(new mongoose.Types.ObjectId()), weekNo: 3, confidence: 0.85 });
+    const stored = await NoteItemModel.findById(s2._id);
+    check("suggestion stored, job done", stored?.suggestJob?.state === "done" && stored.suggestion?.weekNo === 3);
+
+    const s3 = await textNote();
+    await enqueueSuggest(s3._id);
+    const c3 = (await claimNextSuggest(mine))!;
+    await NoteItemModel.updateOne({ _id: s3._id }, { courseId: new mongoose.Types.ObjectId(), weekNo: 1 }); // user assigned it meanwhile
+    await completeSuggest(c3, { courseId: String(new mongoose.Types.ObjectId()), weekNo: 3, confidence: 0.9 });
+    const moved = await NoteItemModel.findById(s3._id);
+    check("result dropped when the note left the inbox", moved?.suggestJob?.state === "done" && !moved.suggestion);
+
+    const s4 = await textNote();
+    await NoteItemModel.updateOne({ _id: s4._id }, { suggestJob: { state: "processing", attempts: 3, leaseUntil: new Date(Date.now() - 1000), runAt: new Date() } });
+    await sweepSuggest();
+    check("sweep closes exhausted expired suggest leases", (await NoteItemModel.findById(s4._id))?.suggestJob?.state === "done");
+
+    // processSuggest end to end with a real semester/course and the fake model
+    if (gemini) {
+      const monday = new Date();
+      monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+      monday.setUTCHours(12, 0, 0, 0);
+      const sem = await SemesterModel.create({ userId: userA, name: "T", startDate: monday, weekCount: 14, isActive: true });
+      const course = await CourseModel.create({ userId: userA, semesterId: sem._id, code: "T-1", name: "Test dersi" });
+      const week = semesterWeekNo({ startDate: monday.toISOString(), weekCount: 14 }, new Date());
+
+      const p1 = await textNote();
+      await enqueueSuggest(p1._id);
+      await processSuggest((await claimNextSuggest(mine))!);
+      let done = await NoteItemModel.findById(p1._id);
+      check("processSuggest: course + week from the note date", String(done?.suggestion?.courseId) === String(course._id) && done?.suggestion?.weekNo === week && done?.suggestJob?.state === "done");
+
+      // captured before the semester started: the week is outside it, so no suggestion (the AI never picks weeks)
+      const old = await textNote({ capturedAt: new Date(monday.getTime() - 8 * 24 * 3600 * 1000) });
+      await enqueueSuggest(old._id);
+      await processSuggest((await claimNextSuggest(mine))!);
+      done = await NoteItemModel.findById(old._id);
+      check("processSuggest: capturedAt before the semester -> no suggestion", !done?.suggestion && done?.suggestJob?.state === "done");
+
+      gemini.setSuggestConfidence(0.5);
+      const low = await textNote();
+      await enqueueSuggest(low._id);
+      await processSuggest((await claimNextSuggest(mine))!);
+      check("processSuggest: confidence 0.5 -> nothing stored", !(await NoteItemModel.findById(low._id))?.suggestion);
+      gemini.setSuggestConfidence(0.9);
+
+      gemini.failNextWith(429);
+      const quota = await textNote();
+      await enqueueSuggest(quota._id);
+      await processSuggest((await claimNextSuggest(mine))!);
+      const q = (await NoteItemModel.findById(quota._id))?.suggestJob;
+      check("processSuggest: 429 -> deferred, attempt not used", q?.state === "pending" && q.attempts === 0 && q.deferrals === 1);
+    }
+    }
   } finally {
     await cleanup();
     await mongoose.disconnect();
