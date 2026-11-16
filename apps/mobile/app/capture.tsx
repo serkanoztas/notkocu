@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
+import { useShareIntentContext } from "expo-share-intent";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TargetPicker, type PickedTarget } from "../src/components/TargetPicker";
@@ -51,6 +52,10 @@ function normalizeUrl(raw: string): string | null {
   }
 }
 
+const DOC_EXTENSIONS = [".pdf", ".docx", ".pptx"];
+const isDocument = (f: { mimeType?: string | null; fileName?: string | null }) =>
+  DOC_TYPES.includes(f.mimeType ?? "") || DOC_EXTENSIONS.some((x) => (f.fileName ?? "").toLowerCase().endsWith(x));
+
 const formatSize = (bytes?: number) =>
   bytes === undefined ? "" : bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
@@ -62,6 +67,8 @@ export default function CaptureScreen() {
   const now = useNow(); // the shown target refreshes once a minute while this sheet is open
   const schedule = useScheduleNow(now);
   const outbox = useOutbox();
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
+  const [fromShare, setFromShare] = useState(false);
 
   // A target the user chose by hand (or via "Not al" on a course) stays fixed; otherwise it follows the clock.
   const [manual, setManual] = useState<PickedTarget | null>(
@@ -101,6 +108,53 @@ export default function CaptureScreen() {
     const auto = findAutoTarget(schedule.semester, schedule.courses, new Date(), timeZone);
     return auto ? { courseId: auto.course._id, weekNo: auto.weekNo } : { courseId: null };
   }
+
+  // Content shared from another app (WhatsApp, Drive, a browser ...): fill the screen, the user presses Kaydet.
+  useEffect(() => {
+    if (!hasShareIntent) return;
+    setFromShare(true);
+    const files = shareIntent.files ?? [];
+    const toPicked = (f: (typeof files)[number]): PickedFile => ({
+      uri: f.path,
+      name: f.fileName || (f.mimeType?.startsWith("image/") ? "foto.jpg" : "belge"),
+      size: f.size ?? undefined,
+    });
+
+    if (files.length > 0) {
+      const images = files.filter((f) => f.mimeType?.startsWith("image/"));
+      const docsShared = files.filter(isDocument);
+      if (images.length > 0) {
+        setType("image");
+        setPhotos(images.slice(0, MAX_PHOTOS).map(toPicked));
+        setError(null);
+      } else if (docsShared.length > 0) {
+        const fit = docsShared.filter((f) => (f.size ?? 0) <= MAX_DOC_BYTES);
+        setType("document");
+        setDocs(fit.slice(0, MAX_DOCS).map(toPicked));
+        setError(fit.length < docsShared.length ? "Dosya en fazla 20 MB olabilir" : null);
+      } else {
+        setError("Bu dosya türü desteklenmiyor. Fotoğraf, PDF, DOCX ve PPTX paylaşabilirsin.");
+      }
+    } else if (shareIntent.webUrl) {
+      const link = shareIntent.webUrl;
+      // WhatsApp-style shares carry a sentence around the address: keep it as the title.
+      const title = (shareIntent.meta?.title || (shareIntent.text ?? "").replace(link, "")).replace(/\s+/g, " ").trim();
+      setType("link");
+      setUrl(link);
+      setLinkTitle(title.slice(0, 120));
+      setError(null);
+    } else if (shareIntent.text) {
+      setType("text");
+      setText(shareIntent.text.slice(0, 20000));
+      setError(null);
+    }
+  }, [hasShareIntent, shareIntent]);
+
+  // Leaving the screen (saved, closed or swiped away) ends the share, so it is not handled twice.
+  // (resetShareIntent is a new function every render, so it is read through a ref and runs on unmount only.)
+  const resetRef = useRef(resetShareIntent);
+  resetRef.current = resetShareIntent;
+  useEffect(() => () => resetRef.current(), []);
 
   function addPhotos(result: ImagePicker.ImagePickerResult) {
     if (result.canceled) return;
@@ -146,11 +200,12 @@ export default function CaptureScreen() {
     if (saving) return;
     setError(null);
     const target = resolveTarget(); // decided now, at capture time, not when it is finally sent
+    const source = fromShare ? ("share-intent" as const) : ("app" as const);
     const notes: NewOutboxNote[] = [];
 
     if (type === "image" || type === "document") {
       for (const f of type === "image" ? photos : docs) {
-        notes.push({ kind: type, target, file: { uri: f.uri, name: f.name } });
+        notes.push({ kind: type, target, file: { uri: f.uri, name: f.name }, source });
       }
     } else if (type === "link") {
       const normalized = normalizeUrl(url);
@@ -158,9 +213,9 @@ export default function CaptureScreen() {
         setError("Geçerli bir web adresi gir");
         return;
       }
-      notes.push({ kind: "link", target, url: normalized, title: linkTitle.trim() || undefined });
+      notes.push({ kind: "link", target, url: normalized, title: linkTitle.trim() || undefined, source });
     } else if (text.trim()) {
-      notes.push({ kind: "text", target, markdown: text.trim() });
+      notes.push({ kind: "text", target, markdown: text.trim(), source });
     }
     if (notes.length === 0) return;
 

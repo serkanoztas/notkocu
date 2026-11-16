@@ -12,7 +12,8 @@ import {
 } from "@expo-google-fonts/space-grotesk";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import Constants from "expo-constants";
-import { Stack } from "expo-router";
+import { ShareIntentProvider, useShareIntentContext } from "expo-share-intent";
+import { Stack, usePathname, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef } from "react";
@@ -56,8 +57,10 @@ export default function RootLayout() {
         <AuthProvider>
           <OutboxProvider>
             <ScheduleDraftProvider>
-              <StatusBar style="dark" />
-              <RootStack />
+              <ShareIntentProvider>
+                <StatusBar style="dark" />
+                <RootStack />
+              </ShareIntentProvider>
             </ScheduleDraftProvider>
           </OutboxProvider>
         </AuthProvider>
@@ -71,6 +74,9 @@ function RootStack() {
   const signedIn = status === "signedIn";
   const semester = useActiveSemester(signedIn);
   const { replacing } = useScheduleDraft();
+  const router = useRouter();
+  const pathname = usePathname();
+  const { hasShareIntent } = useShareIntentContext();
 
   // Onboarding only when the request succeeded and there is no active semester.
   // Network errors / 5xx keep the tabs open (the Today screen offers a retry).
@@ -88,6 +94,15 @@ function RootStack() {
   useEffect(() => {
     if (ready) SplashScreen.hideAsync();
   }, [ready]);
+
+  // "Paylaş → NotKoçu": once signed in with a semester, open Quick capture with the shared content.
+  // The intent stays in the provider until the screen is done with it (saved or closed), so a share that
+  // arrives during sign-in or onboarding is not lost. A share that arrives while capture is open is
+  // picked up by the screen itself.
+  const canCapture = ready && signedIn && !needsOnboarding && !replacing;
+  useEffect(() => {
+    if (hasShareIntent && canCapture && pathname !== "/capture") router.push("/capture");
+  }, [hasShareIntent, canCapture, pathname, router]);
 
   if (!ready) return null;
 
