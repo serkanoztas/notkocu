@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { CreateNoteRequest, NoteItem, UpdateNoteRequest } from "@notkocu/shared";
-import { api, type PhotoTarget } from "../lib/api";
+import type { NoteItem, UpdateNoteRequest } from "@notkocu/shared";
+import { api } from "../lib/api";
 
 /** Notes still being processed by the worker: the screen polls every few seconds until none are left. */
 const POLL_MS = 4000;
@@ -38,34 +38,17 @@ export const useNote = (id: string) =>
 export const useStorage = () => useQuery({ queryKey: ["storage"], queryFn: api.storage });
 
 /** A note changed: every list that can contain it is stale (counts, week lists, inbox, today). */
-function invalidateNoteViews(queryClient: QueryClient) {
-  for (const key of ["today", "inbox", "course", "week", "note", "storage"]) {
-    void queryClient.invalidateQueries({ queryKey: [key] });
-  }
-}
-
-export function useCreateNote() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CreateNoteRequest) => api.createNote(body),
-    onSuccess: () => invalidateNoteViews(queryClient),
-  });
-}
-
-export function useCreateFileNote() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ kind, uri, target }: { kind: "image" | "document"; uri: string; target: PhotoTarget }) =>
-      api.createFileNote(kind, uri, target),
-    onSuccess: () => invalidateNoteViews(queryClient),
-  });
+export function invalidateNoteViews(queryClient: QueryClient): Promise<unknown> {
+  return Promise.all(
+    ["today", "inbox", "course", "week", "note", "storage"].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
+  );
 }
 
 export function useRetryNote(id: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => api.retryNote(id),
-    onSuccess: () => invalidateNoteViews(queryClient),
+    onSuccess: () => void invalidateNoteViews(queryClient),
   });
 }
 
@@ -73,7 +56,7 @@ export function useUpdateNote(id: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: UpdateNoteRequest) => api.updateNote(id, body),
-    onSuccess: () => invalidateNoteViews(queryClient),
+    onSuccess: () => void invalidateNoteViews(queryClient),
   });
 }
 
@@ -82,7 +65,7 @@ export function useAssignNote() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateNoteRequest }) => api.updateNote(id, body),
-    onSuccess: () => invalidateNoteViews(queryClient),
+    onSuccess: () => void invalidateNoteViews(queryClient),
   });
 }
 
@@ -91,7 +74,7 @@ export function useApproveSuggestions() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (noteIds: string[]) => api.approveSuggestions(noteIds),
-    onSuccess: () => invalidateNoteViews(queryClient),
+    onSuccess: () => void invalidateNoteViews(queryClient),
   });
 }
 
@@ -100,7 +83,7 @@ export function useUndoAssign() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (noteIds: string[]) => Promise.all(noteIds.map((id) => api.updateNote(id, { courseId: null }))),
-    onSuccess: () => invalidateNoteViews(queryClient),
+    onSuccess: () => void invalidateNoteViews(queryClient),
   });
 }
 

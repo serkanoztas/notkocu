@@ -4,6 +4,7 @@ import { ActivityIndicator, Alert, Pressable, Text, View } from "react-native";
 import { Screen } from "../../src/components/Screen";
 import { useStorage } from "../../src/hooks/queries";
 import { useAuth } from "../../src/lib/auth";
+import { useOutbox } from "../../src/lib/OutboxProvider";
 import { useScheduleDraft } from "../../src/lib/scheduleDraft";
 
 /** Bytes as "23 MB"; below 1 MB shown with one decimal so a first photo is not "0 MB". */
@@ -17,6 +18,8 @@ export default function SettingsScreen() {
   const router = useRouter();
   const draft = useScheduleDraft();
   const storage = useStorage();
+  const outbox = useOutbox();
+  const unsent = outbox.entries.length;
   const [busy, setBusy] = useState(false);
   const [openFlow, setOpenFlow] = useState(false);
 
@@ -41,9 +44,22 @@ export default function SettingsScreen() {
     ]);
   }
 
-  async function onSignOut() {
+  async function doSignOut() {
     setBusy(true);
+    outbox.clearAll(); // the user was told; notes of this account must not wait for the next one
     await signOut(); // this screen unmounts once signed out
+  }
+
+  function onSignOut() {
+    if (unsent === 0) return void doSignOut();
+    Alert.alert(
+      "Gönderilmemiş notların var",
+      `${unsent} not henüz sunucuya gönderilmedi. Şimdi çıkış yaparsan bu notlar silinir.`,
+      [
+        { text: "Vazgeç", style: "cancel" },
+        { text: "Yine de çık", style: "destructive", onPress: () => void doSignOut() },
+      ],
+    );
   }
 
   return (
@@ -66,6 +82,18 @@ export default function SettingsScreen() {
               style={{ width: `${Math.min(100, (storage.data.usedBytes / storage.data.limitBytes) * 100)}%` }}
             />
           </View>
+        </View>
+      ) : null}
+      {unsent > 0 ? (
+        <View className="flex-row items-center justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-100 p-5">
+          <Text className="flex-1 font-body-semibold text-base text-amber-900">{unsent} not gönderilmedi</Text>
+          <Pressable
+            onPress={() => void outbox.flush()}
+            accessibilityRole="button"
+            className="min-h-touch justify-center rounded-xl border border-amber-300 bg-white px-4 active:opacity-80"
+          >
+            <Text className="font-body-semibold text-base text-amber-900">Şimdi gönder</Text>
+          </Pressable>
         </View>
       ) : null}
       <Pressable

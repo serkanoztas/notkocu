@@ -10,8 +10,8 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import { createApp } from "../src/app";
 import { env } from "../src/config/env";
-import { semesterWeekNo } from "@notkocu/shared";
-import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
+import { dayIndex, minutesOfDay, semesterWeekNo } from "@notkocu/shared";
+import { CourseModel, NoteItemModel, SemesterModel, SessionModel } from "../src/models";
 import { ocrPdfPages } from "../src/services/ai/documentOcr";
 import { deleteUserFiles, getUsage } from "../src/services/files";
 import { signAccessToken } from "../src/services/auth/tokens";
@@ -36,6 +36,7 @@ async function cleanup() {
   await worker?.stop();
   await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
   await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await SessionModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
@@ -216,7 +217,7 @@ async function main() {
 
     // --- inbox course suggestions (the course's own week comes from the note date, not from the AI) ---
     const monday = new Date();
-    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7) - 14); // started two weeks ago
     monday.setUTCHours(12, 0, 0, 0);
     const semester = await SemesterModel.create({ userId: userA, name: "Test Güz", startDate: monday, weekCount: 14, isActive: true });
     const vtCourse = await CourseModel.create({ userId: userA, semesterId: semester._id, code: "YBS-301", name: "Veritabanı Yönetim Sistemleri", instructor: "Dr. Test" });
@@ -272,6 +273,45 @@ async function main() {
       check("confidence < 0.7 -> no suggestion shown", !!unsureNow && !unsureNow.suggestion && !unsureNow.suggesting);
       gemini.setSuggestConfidence(0.9);
     }
+
+    // --- clientId idempotency and capturedAt (what the app's outbox relies on) ---
+    const cid = `check${Date.now().toString(36)}a`;
+    const first = await jsonPost(tokenA, { type: "text", markdown: "outbox notu", courseId: null, clientId: cid });
+    const firstBody = (await first.json()) as { note: { _id: string } };
+    const second = await jsonPost(tokenA, { type: "text", markdown: "outbox notu", courseId: null, clientId: cid });
+    const secondBody = (await second.json()) as { note: { _id: string } };
+    check("same clientId again: 200 and the same note", first.status === 201 && second.status === 200 && firstBody.note._id === secondBody.note._id);
+    check("exactly one note for that clientId", (await NoteItemModel.countDocuments({ userId: userA, clientId: cid })) === 1);
+    const otherUser = await jsonPost(tokenB, { type: "text", markdown: "başka kullanıcı", courseId: null, clientId: cid });
+    check("clientId is per user (the same id for another user creates its own note)", otherUser.status === 201);
+
+    const raceId = `check${Date.now().toString(36)}r`;
+    const race = await Promise.all([1, 2, 3].map(() => jsonPost(tokenA, { type: "text", markdown: "yarış", courseId: null, clientId: raceId })));
+    check("three simultaneous requests with one clientId -> one note", (await NoteItemModel.countDocuments({ userId: userA, clientId: raceId })) === 1 && race.every((r) => r.status === 200 || r.status === 201));
+
+    const fileId = `check${Date.now().toString(36)}f`;
+    const postPhoto = () => fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(jpg, { type: "image", inbox: "1", clientId: fileId }) });
+    const p1 = await postPhoto();
+    const p2 = await postPhoto();
+    check("retried photo upload: 201 then 200, one note, one file pair", p1.status === 201 && p2.status === 200 && (await NoteItemModel.countDocuments({ userId: userA, clientId: fileId })) === 1);
+
+    const tz = "Europe/Istanbul";
+    const taken = new Date(Date.now() - 2 * 24 * 3600 * 1000); // two days ago
+    const mins = minutesOfDay(taken, tz);
+    const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    await SessionModel.create({ userId: userA, courseId: vtCourse._id, day: dayIndex(taken, tz), start: hhmm(Math.max(0, mins - 5)), end: hhmm(Math.min(1439, mins + 55)), kind: "teori" });
+    const lateId = `check${Date.now().toString(36)}c`;
+    res = await jsonPost(tokenA, { type: "text", markdown: "geç gelen not", clientId: lateId, capturedAt: taken.toISOString() }); // no target: the server decides
+    const late = ((await res.json()) as { note: { courseId: string | null; weekNo?: number; createdAt: string; capturedAt?: string } }).note;
+    const lateWeek = semesterWeekNo({ startDate: monday.toISOString(), weekCount: 14 }, taken, tz);
+    check("capturedAt decides the target (the class two days ago), not the arrival time", late.courseId === String(vtCourse._id) && late.weekNo === lateWeek, JSON.stringify({ c: late.courseId, w: late.weekNo, want: lateWeek }));
+    check("createdAt follows capturedAt", Math.abs(+new Date(late.createdAt) - +taken) < 1000 && late.capturedAt !== undefined);
+
+    res = await jsonPost(tokenA, { type: "text", markdown: "gelecekten", courseId: null, capturedAt: new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString() });
+    const future = ((await res.json()) as { note: { createdAt: string } }).note;
+    check("a capturedAt in the future is clamped to now", Math.abs(+new Date(future.createdAt) - Date.now()) < 60_000);
+    res = await jsonPost(tokenA, { type: "text", markdown: "x", courseId: null, clientId: "short" });
+    check("malformed clientId rejected 400", res.status === 400);
 
     // Large-file path: same PDF through the Files API (and deleted at the provider afterwards).
     const viaFilesApi = await ocrPdfPages(scannedPdf, { forceFilesApi: true });

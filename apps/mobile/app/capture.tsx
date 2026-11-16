@@ -6,10 +6,10 @@ import { useState } from "react";
 import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TargetPicker, type PickedTarget } from "../src/components/TargetPicker";
-import { useCreateFileNote, useCreateNote } from "../src/hooks/queries";
+import type { NewOutboxNote } from "../src/lib/OutboxProvider";
 import { useNow, useTimeZone } from "../src/hooks/useNow";
 import { findAutoTarget, useScheduleNow } from "../src/hooks/useSchedule";
-import { ApiError } from "../src/lib/api";
+import { useOutbox } from "../src/lib/OutboxProvider";
 
 type IconName = keyof typeof Ionicons.glyphMap;
 type CaptureType = "text" | "image" | "document" | "link";
@@ -38,17 +38,6 @@ interface PickedFile {
   size?: number;
 }
 
-function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.code === "STORAGE_LIMIT") return "Depolama alanın doldu";
-    if (err.code === "IMAGE_TOO_LARGE") return "Fotoğraf çok büyük";
-    if (err.code === "FILE_TOO_LARGE") return "Dosya en fazla 20 MB olabilir";
-    if (err.code === "UNSUPPORTED_DOCUMENT_TYPE") return "Yalnızca PDF, DOCX ve PPTX desteklenir";
-    return err.code === "NETWORK" || err.code === "TIMEOUT" ? "Bağlantı yok, not kaydedilemedi" : err.message;
-  }
-  return "Not kaydedilemedi, tekrar dene";
-}
-
 /** "example.com/x" -> "https://example.com/x"; null when it cannot be a web address. */
 function normalizeUrl(raw: string): string | null {
   const value = raw.trim();
@@ -72,8 +61,7 @@ export default function CaptureScreen() {
   const timeZone = useTimeZone();
   const now = useNow(); // the shown target refreshes once a minute while this sheet is open
   const schedule = useScheduleNow(now);
-  const create = useCreateNote();
-  const createFile = useCreateFileNote();
+  const outbox = useOutbox();
 
   // A target the user chose by hand (or via "Not al" on a course) stays fixed; otherwise it follows the clock.
   const [manual, setManual] = useState<PickedTarget | null>(
@@ -87,7 +75,7 @@ export default function CaptureScreen() {
   const [url, setUrl] = useState("");
   const [linkTitle, setLinkTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const manualCourse = manual?.courseId ? schedule.courses.find((c) => c._id === manual.courseId) : undefined;
   const target = manual
@@ -152,52 +140,41 @@ export default function CaptureScreen() {
     setDocs((prev) => [...prev, ...ok.map((a) => ({ uri: a.uri, name: a.name, size: a.size }))].slice(0, MAX_DOCS));
   }
 
-  // One note per file, uploaded one after another. Uploaded files leave the list; a failure stops
-  // the batch and keeps the rest so "Kaydet" can be pressed again.
-  async function saveFiles(kind: "image" | "document") {
-    const list = kind === "image" ? photos : docs;
-    const setList = kind === "image" ? setPhotos : setDocs;
-    if (list.length === 0 || createFile.isPending) return;
+  // "Kaydet" only writes to the device (text, address, a copy of each file) and returns at once; the
+  // outbox sends in the background and keeps retrying when there is no connection.
+  async function save() {
+    if (saving) return;
     setError(null);
-    const resolved = resolveTarget();
-    const total = list.length;
-    let done = 0;
-    for (const file of [...list]) {
-      setProgress({ done, total });
-      try {
-        await createFile.mutateAsync({ kind, uri: file.uri, target: resolved });
-      } catch (e) {
-        setProgress(null);
-        setError(errorText(e));
-        return;
-      }
-      done += 1;
-      setList((prev) => prev.filter((f) => f.uri !== file.uri));
-    }
-    setProgress(null);
-    router.back();
-  }
+    const target = resolveTarget(); // decided now, at capture time, not when it is finally sent
+    const notes: NewOutboxNote[] = [];
 
-  function save() {
-    if (type === "image" || type === "document") return void saveFiles(type);
-    if (create.isPending) return;
-    setError(null);
-    const resolved = resolveTarget();
-    const done = { onSuccess: () => router.back(), onError: (e: unknown) => setError(errorText(e)) };
-    if (type === "link") {
+    if (type === "image" || type === "document") {
+      for (const f of type === "image" ? photos : docs) {
+        notes.push({ kind: type, target, file: { uri: f.uri, name: f.name } });
+      }
+    } else if (type === "link") {
       const normalized = normalizeUrl(url);
       if (!normalized) {
         setError("Geçerli bir web adresi gir");
         return;
       }
-      create.mutate({ type: "link", url: normalized, title: linkTitle.trim() || undefined, ...resolved }, done);
-      return;
+      notes.push({ kind: "link", target, url: normalized, title: linkTitle.trim() || undefined });
+    } else if (text.trim()) {
+      notes.push({ kind: "text", target, markdown: text.trim() });
     }
-    if (!text.trim()) return;
-    create.mutate({ type: "text", markdown: text.trim(), ...resolved }, done);
+    if (notes.length === 0) return;
+
+    setSaving(true);
+    try {
+      for (const note of notes) await outbox.add(note);
+      router.back();
+    } catch {
+      setError("Not cihaza kaydedilemedi, depolama alanını kontrol et");
+      setSaving(false);
+    }
   }
 
-  const busy = create.isPending || createFile.isPending;
+  const busy = saving;
   const canSave =
     !busy &&
     (type === "image"
@@ -421,7 +398,7 @@ export default function CaptureScreen() {
           className={`min-h-[56px] items-center justify-center rounded-2xl ${canSave ? "bg-primary active:opacity-80" : "bg-line"}`}
         >
           <Text className={`font-body-semibold text-base ${canSave ? "text-white" : "text-muted"}`}>
-            {progress ? `Yükleniyor ${Math.min(progress.done + 1, progress.total)}/${progress.total}…` : busy ? "Kaydediliyor…" : "Kaydet"}
+            {busy ? "Kaydediliyor…" : "Kaydet"}
           </Text>
         </Pressable>
       </View>

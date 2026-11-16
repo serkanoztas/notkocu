@@ -65,8 +65,17 @@ const uploadLimiter = rateLimit({
   skip: (req) => !req.is("multipart/form-data"),
 });
 
+// Sent by the app's outbox with every note. clientId makes a retried request idempotent; capturedAt is when
+// the note was really taken (the target is decided by that moment, not by the time it reaches the server).
+const metaFields = {
+  clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
+  capturedAt: z.string().datetime({ offset: true }).optional(),
+  source: z.enum(["app", "share-intent"]).optional(),
+};
+
 // Multipart has no null, so "inbox" is its own flag; fields arrive as strings.
 const uploadForm = z.object({
+  ...metaFields,
   type: z.enum(["image", "document"]),
   title: title.optional(),
   courseId: objectIdLike.optional(),
@@ -75,6 +84,7 @@ const uploadForm = z.object({
 });
 
 const targetFields = {
+  ...metaFields,
   courseId: objectIdLike.nullable().optional(),
   weekNo: z.number().int().min(1).max(60).optional(),
 };
@@ -124,13 +134,33 @@ type Target = { courseId: string; weekNo: number; sessionId?: string } | null;
 async function resolveTarget(
   userId: string,
   want: { courseId?: string | null; weekNo?: number },
+  when: Date,
 ): Promise<Target> {
-  if (want.courseId === undefined) return autoAssign(userId, new Date()); // the server clock decides, in the user's time zone
+  if (want.courseId === undefined) return autoAssign(userId, when); // by the moment the note was taken, in the user's time zone
   if (want.courseId === null) return null; // explicit inbox
   if (want.weekNo === undefined) throw new AppError(400, "weekNo gerekli", "VALIDATION_ERROR");
   await assertManualTarget(userId, want.courseId, want.weekNo);
   return { courseId: want.courseId, weekNo: want.weekNo };
 }
+
+type Meta = { clientId?: string; capturedAt?: string; source?: "app" | "share-intent" };
+
+/** Moment the note was taken (never in the future) and the fields every created note carries. */
+function metaOf(m: Meta) {
+  const now = new Date();
+  let captured = m.capturedAt ? new Date(m.capturedAt) : undefined;
+  if (captured && (Number.isNaN(+captured) || +captured > +now)) captured = now;
+  return {
+    when: captured ?? now,
+    stamp: {
+      clientId: m.clientId,
+      source: m.source ?? "app",
+      ...(captured ? { capturedAt: captured, createdAt: captured } : {}),
+    },
+  };
+}
+
+const isDuplicateKey = (err: unknown) => (err as { code?: number } | null)?.code === 11000;
 
 const placement = (target: Target) => ({
   courseId: target?.courseId ?? null,
@@ -148,13 +178,30 @@ function cleanFileName(raw: string): string {
   return name.replace(/[\\/\u0000-\u001f]/g, "_").trim().slice(0, 120) || "belge";
 }
 
+/** The note this clientId already created, if any: the request is a retry. */
+const existingNote = (userId: string, clientId?: string) =>
+  clientId ? NoteItemModel.findOne({ userId, clientId }) : Promise.resolve(null);
+
 async function createUploadNote(userId: string, raw: unknown, file: Express.Multer.File | undefined) {
   if (!file) throw new AppError(400, "Dosya gerekli", "FILE_REQUIRED");
   const form = uploadForm.parse(raw);
-  const target = await resolveTarget(userId, { courseId: form.inbox ? null : form.courseId, weekNo: form.weekNo });
-  return form.type === "image"
-    ? createImageNote(userId, form, target, file)
-    : createDocumentNote(userId, form, target, file);
+  const known = await existingNote(userId, form.clientId); // before any processing or storage
+  if (known) return { note: known, created: false };
+
+  const { when, stamp } = metaOf(form);
+  const target = await resolveTarget(userId, { courseId: form.inbox ? null : form.courseId, weekNo: form.weekNo }, when);
+  try {
+    const note =
+      form.type === "image"
+        ? await createImageNote(userId, form, target, file, stamp)
+        : await createDocumentNote(userId, form, target, file, stamp);
+    return { note, created: true };
+  } catch (err) {
+    // Two requests with the same clientId raced: the files of ours are already removed, return the winner.
+    const winner = isDuplicateKey(err) ? await existingNote(userId, form.clientId) : null;
+    if (winner) return { note: winner, created: false };
+    throw err;
+  }
 }
 
 async function createImageNote(
@@ -162,6 +209,7 @@ async function createImageNote(
   form: z.infer<typeof uploadForm>,
   target: Target,
   file: Express.Multer.File,
+  stamp: ReturnType<typeof metaOf>["stamp"],
 ) {
   const mime = sniffImageMime(file.buffer);
   if (!mime) throw new AppError(400, "Desteklenmeyen dosya türü", "UNSUPPORTED_IMAGE_TYPE");
@@ -186,7 +234,7 @@ async function createImageNote(
       title: form.title || DEFAULT_IMAGE_TITLE,
       content: { fileKey, thumbKey, mime: processed.mime, width: processed.width, height: processed.height },
       status: "pending", // the worker picks it up
-      source: "app",
+      ...stamp,
     });
   } catch (err) {
     await deleteFiles(userId, saved); // no note, no orphan files
@@ -199,6 +247,7 @@ async function createDocumentNote(
   form: z.infer<typeof uploadForm>,
   target: Target,
   file: Express.Multer.File,
+  stamp: ReturnType<typeof metaOf>["stamp"],
 ) {
   const kind = sniffDocument(file.buffer);
   if (!kind) throw new AppError(400, "Yalnızca PDF, DOCX ve PPTX desteklenir", "UNSUPPORTED_DOCUMENT_TYPE");
@@ -215,7 +264,7 @@ async function createDocumentNote(
       title: form.title || fileName.replace(/\.[^.]+$/, "") || "Belge",
       content: { fileKey, mime, fileName, size: file.buffer.length },
       status: "pending", // the worker extracts the text
-      source: "app",
+      ...stamp,
     });
   } catch (err) {
     await deleteFiles(userId, [fileKey]);
@@ -231,38 +280,54 @@ notesRouter.post(
     const userId = req.userId;
 
     if (req.is("multipart/form-data")) {
-      const note = await createUploadNote(userId, req.body, req.file);
-      await markWeeksStale(userId, [note]);
+      const { note, created } = await createUploadNote(userId, req.body, req.file);
+      if (created) await markWeeksStale(userId, [note]);
       const out: NoteResponse = { note: serializeNote(note.toJSON()) };
-      res.status(201).json(out);
+      res.status(created ? 201 : 200).json(out);
       return;
     }
 
     const body = createBody.parse(req.body);
-    const target = await resolveTarget(userId, body);
+    const known = await existingNote(userId, body.clientId);
+    if (known) {
+      const out: NoteResponse = { note: serializeNote(known.toJSON()) };
+      res.status(200).json(out);
+      return;
+    }
+    const { when, stamp } = metaOf(body);
+    const target = await resolveTarget(userId, body, when);
 
-    const note =
-      body.type === "text"
-        ? await NoteItemModel.create({
-            userId,
-            ...placement(target),
-            type: "text",
-            title: body.title || titleFromMarkdown(body.markdown),
-            content: { markdown: body.markdown },
-            extractedText: body.markdown,
-            status: "ready", // text needs no processing
-            source: "app",
-          })
-        : await NoteItemModel.create({
-            userId,
-            ...placement(target),
-            type: "link",
-            title: body.title || new URL(body.url).hostname,
-            content: { url: body.url, siteTitle: body.title || undefined },
-            extractedText: [body.title, body.url].filter(Boolean).join("\n"),
-            status: "ready", // only url + title are kept, nothing to process
-            source: "app",
-          });
+    let note;
+    try {
+      note =
+        body.type === "text"
+          ? await NoteItemModel.create({
+              userId,
+              ...placement(target),
+              type: "text",
+              title: body.title || titleFromMarkdown(body.markdown),
+              content: { markdown: body.markdown },
+              extractedText: body.markdown,
+              status: "ready", // text needs no processing
+              ...stamp,
+            })
+          : await NoteItemModel.create({
+              userId,
+              ...placement(target),
+              type: "link",
+              title: body.title || new URL(body.url).hostname,
+              content: { url: body.url, siteTitle: body.title || undefined },
+              extractedText: [body.title, body.url].filter(Boolean).join("\n"),
+              status: "ready", // only url + title are kept, nothing to process
+              ...stamp,
+            });
+    } catch (err) {
+      const winner = isDuplicateKey(err) ? await existingNote(userId, body.clientId) : null;
+      if (!winner) throw err;
+      const out: NoteResponse = { note: serializeNote(winner.toJSON()) };
+      res.status(200).json(out);
+      return;
+    }
     await markWeeksStale(userId, [note]);
     await enqueueSuggest(note._id); // text and links in the inbox get a course suggestion right away
     const fresh = await NoteItemModel.findById(note._id);

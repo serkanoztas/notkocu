@@ -5,6 +5,7 @@ import { Pressable, Text, View } from "react-native";
 import { semesterWeekNo, type CourseWithSessions, type NoteItem } from "@notkocu/shared";
 import { AuthImage } from "../../src/components/AuthImage";
 import { NoteTypeBadge } from "../../src/components/NoteTypeBadge";
+import { OutboxRow } from "../../src/components/OutboxRow";
 import { Placeholder, Screen } from "../../src/components/Screen";
 import { TargetPicker } from "../../src/components/TargetPicker";
 import { useApproveSuggestions, useAssignNote, useInbox, useUndoAssign } from "../../src/hooks/queries";
@@ -12,6 +13,7 @@ import { useNow, useTimeZone } from "../../src/hooks/useNow";
 import { useScheduleNow } from "../../src/hooks/useSchedule";
 import { ApiError } from "../../src/lib/api";
 import { formatStamp } from "../../src/lib/format";
+import { useOutbox } from "../../src/lib/OutboxProvider";
 
 const UNDO_MS = 8000;
 
@@ -37,6 +39,7 @@ export default function InboxScreen() {
   const assign = useAssignNote();
   const approve = useApproveSuggestions();
   const undoAssign = useUndoAssign();
+  const unsent = useOutbox().entries.filter((e) => !e.target || e.target.courseId === null);
   const [assigning, setAssigning] = useState<NoteItem | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [undo, setUndo] = useState<{ ids: string[]; text: string } | null>(null);
@@ -124,7 +127,14 @@ export default function InboxScreen() {
             </Pressable>
           </View>
         ) : null}
-        {inbox.data && notes.length === 0 ? <Placeholder text="Derse atanmamış not yok." /> : null}
+        {inbox.data && notes.length === 0 && unsent.length === 0 ? <Placeholder text="Derse atanmamış not yok." /> : null}
+        {unsent.length > 0 ? (
+          <View className="overflow-hidden rounded-2xl border border-line bg-card">
+            {unsent.map((e, i) => (
+              <OutboxRow key={e.clientId} entry={e} divider={i > 0} />
+            ))}
+          </View>
+        ) : null}
         {error ? <Text className="font-body text-sm text-red-700">{error}</Text> : null}
 
         {notes.map((n) => (

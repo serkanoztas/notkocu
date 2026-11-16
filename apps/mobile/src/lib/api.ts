@@ -127,6 +127,12 @@ export interface PhotoTarget {
   weekNo?: number;
 }
 
+export interface UploadMeta {
+  clientId: string;
+  capturedAt: string;
+  source: "app" | "share-intent";
+}
+
 /** Authorization header for image requests (RN <Image> cannot go through request()). */
 export async function authHeaders(): Promise<Record<string, string>> {
   await tokenStore.hydrate();
@@ -150,9 +156,13 @@ export const api = {
     form.append("image", new File(image.uri) as unknown as Blob);
     return request<ParseScheduleResponse>("/api/schedule/parse", { method: "POST", form, timeoutMs: 60000 });
   },
-  createFileNote: (kind: "image" | "document", fileUri: string, target: PhotoTarget) => {
+  createFileNote: (kind: "image" | "document", fileUri: string, target: PhotoTarget, meta: UploadMeta, title?: string) => {
     const form = new FormData();
     form.append("type", kind);
+    form.append("clientId", meta.clientId);
+    form.append("capturedAt", meta.capturedAt);
+    form.append("source", meta.source);
+    if (title) form.append("title", title);
     if (target.courseId === null) form.append("inbox", "1");
     else if (target.courseId) {
       form.append("courseId", target.courseId);

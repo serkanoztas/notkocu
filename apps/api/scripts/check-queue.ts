@@ -127,6 +127,23 @@ async function main() {
     await sweepExhausted();
     check("sweep fails exhausted expired leases", (await NoteItemModel.findById(n2._id))?.status === "failed");
 
+    // --- clientId unique index and createdAt override (database level; the HTTP side is in check-http) ---
+    {
+      await NoteItemModel.init(); // make sure the partial unique index exists
+      const cid = `queue${Date.now().toString(36)}`;
+      const when = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+      const make = (userId: string, clientId?: string) =>
+        NoteItemModel.create({ userId, courseId: null, type: "text", title: "c", content: { markdown: "x" }, extractedText: "x", status: "ready", clientId, capturedAt: when, createdAt: when });
+      const a = await make(userA, cid);
+      check("createdAt can be set from capturedAt", Math.abs(+a.createdAt - +when) < 1000);
+      const dup = await make(userA, cid).then(() => null, (e: { code?: number }) => e.code);
+      check("same (userId, clientId) twice -> duplicate key error", dup === 11000);
+      const otherUser = await make(userB, cid).then(() => true, () => false);
+      check("same clientId for another user is fine", otherUser);
+      const none = await Promise.all([make(userA), make(userA), make(userA)]).then(() => true, () => false);
+      check("notes without a clientId are not limited", none);
+    }
+
     // --- suggestion lane (own block: it reuses names of the queue checks above) ---
     {
     const mine = { userId: { $in: [userA, userB] } }; // the lane claim is limited to our own notes

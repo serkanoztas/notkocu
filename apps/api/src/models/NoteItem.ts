@@ -60,6 +60,9 @@ const noteItemSchema = new Schema(
     },
     job: { type: jobSchema, default: () => ({}) },
     suggestJob: { type: suggestJobSchema },
+    // Chosen by the app for every note: a retried upload with the same (userId, clientId) returns the
+    // existing note instead of creating a second one (see the unique index below).
+    clientId: String,
     // When the note was actually taken (the outbox may deliver it later); createdAt follows it.
     capturedAt: Date,
     source: { type: String, enum: ["app", "share-intent"], default: "app" },
@@ -76,5 +79,6 @@ noteItemSchema.index({ userId: 1, courseId: 1, createdAt: -1 });
 noteItemSchema.index({ status: 1, "job.runAt": 1 });
 noteItemSchema.index({ status: 1, "job.leaseUntil": 1 });
 noteItemSchema.index({ "suggestJob.state": 1, "suggestJob.runAt": 1 });
+noteItemSchema.index({ userId: 1, clientId: 1 }, { unique: true, partialFilterExpression: { clientId: { $type: "string" } } });
 
 export const NoteItemModel = model("NoteItem", noteItemSchema);

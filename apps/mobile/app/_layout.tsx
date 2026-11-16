@@ -21,6 +21,7 @@ import { useActiveSemester } from "../src/hooks/useActiveSemester";
 import { AuthProvider, useAuth } from "../src/lib/auth";
 import { CACHE_MAX_AGE_MS, queryClient } from "../src/lib/queryClient";
 import { queryPersister } from "../src/lib/queryPersister";
+import { OutboxProvider } from "../src/lib/OutboxProvider";
 import { ScheduleDraftProvider, useScheduleDraft } from "../src/lib/scheduleDraft";
 
 SplashScreen.preventAutoHideAsync();
@@ -53,10 +54,12 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
         <AuthProvider>
-          <ScheduleDraftProvider>
-            <StatusBar style="dark" />
-            <RootStack />
-          </ScheduleDraftProvider>
+          <OutboxProvider>
+            <ScheduleDraftProvider>
+              <StatusBar style="dark" />
+              <RootStack />
+            </ScheduleDraftProvider>
+          </OutboxProvider>
         </AuthProvider>
       </PersistQueryClientProvider>
     </SafeAreaProvider>

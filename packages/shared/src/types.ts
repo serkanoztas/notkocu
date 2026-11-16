@@ -234,7 +234,16 @@ export interface HealthResponse {
 
 export type SessionState = "upcoming" | "ongoing" | "done";
 
-interface CreateNoteTarget {
+/** Sent by the app's outbox with every note (see docs: outbox). */
+export interface CreateNoteMeta {
+  /** Chosen by the app; the same clientId never creates a second note (the existing one is returned). */
+  clientId?: string;
+  /** When the note was taken (ISO); the target and the note date follow it, not the arrival time. */
+  capturedAt?: ISODate;
+  source?: NoteSource;
+}
+
+interface CreateNoteTarget extends CreateNoteMeta {
   /** Omitted = the server auto-assigns by the current time; null = inbox; an id = manual (weekNo required). */
   courseId?: Id | null;
   weekNo?: number;
