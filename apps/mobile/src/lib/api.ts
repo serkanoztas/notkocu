@@ -120,7 +120,7 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
-/** Where a new photo note goes: omitted = server auto-assigns; courseId null = inbox. */
+/** Where a new file note (photo or document) goes: omitted = server auto-assigns; courseId null = inbox. */
 export interface PhotoTarget {
   courseId?: string | null;
   weekNo?: number;
@@ -149,17 +149,17 @@ export const api = {
     form.append("image", new File(image.uri) as unknown as Blob);
     return request<ParseScheduleResponse>("/api/schedule/parse", { method: "POST", form, timeoutMs: 60000 });
   },
-  createImageNote: (photoUri: string, target: PhotoTarget) => {
+  createFileNote: (kind: "image" | "document", fileUri: string, target: PhotoTarget) => {
     const form = new FormData();
-    form.append("type", "image");
+    form.append("type", kind);
     if (target.courseId === null) form.append("inbox", "1");
     else if (target.courseId) {
       form.append("courseId", target.courseId);
       if (target.weekNo) form.append("weekNo", String(target.weekNo));
     }
     // expo-file-system File as a part (see parseSchedule); name/type come from the picker's cache file.
-    form.append("file", new File(photoUri) as unknown as Blob);
-    return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: 60000 });
+    form.append("file", new File(fileUri) as unknown as Blob);
+    return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: kind === "document" ? 120000 : 60000 });
   },
   retryNote: (id: string) => request<NoteResponse>(`/api/notes/${id}/retry`, { method: "POST", timeoutMs: 15000 }),
   storage: () => request<StorageUsageResponse>("/api/me/storage"),

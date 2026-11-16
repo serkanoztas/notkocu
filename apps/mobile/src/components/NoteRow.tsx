@@ -29,6 +29,10 @@ export function NoteRow({ note, divider }: { note: NoteItem; divider?: boolean }
           <Text className="font-body text-sm text-muted">İşleniyor…</Text>
         ) : note.status === "failed" ? (
           <Text className="font-body text-sm text-red-700">İşlenemedi</Text>
+        ) : note.type === "link" ? (
+          <Text numberOfLines={1} className="font-body text-sm text-muted">
+            {note.content.url}
+          </Text>
         ) : note.extractedText ? (
           <Text numberOfLines={1} className="font-body text-sm text-muted">
             {note.extractedText.replace(/\s+/g, " ")}

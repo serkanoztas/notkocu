@@ -52,10 +52,11 @@ export function useCreateNote() {
   });
 }
 
-export function useCreateImageNote() {
+export function useCreateFileNote() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ uri, target }: { uri: string; target: PhotoTarget }) => api.createImageNote(uri, target),
+    mutationFn: ({ kind, uri, target }: { kind: "image" | "document"; uri: string; target: PhotoTarget }) =>
+      api.createFileNote(kind, uri, target),
     onSuccess: () => invalidateNoteViews(queryClient),
   });
 }

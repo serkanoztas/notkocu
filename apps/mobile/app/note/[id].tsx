@@ -1,10 +1,11 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useState } from "react";
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NoteItem } from "@notkocu/shared";
 import { AuthImage } from "../../src/components/AuthImage";
 import { BackHeader } from "../../src/components/BackHeader";
+import { DocumentBody } from "../../src/components/DocumentBody";
 import { TargetPicker, type PickedTarget } from "../../src/components/TargetPicker";
 import { useDeleteNote, useNote, useRetryNote, useUpdateNote } from "../../src/hooks/queries";
 import { useActiveSemester } from "../../src/hooks/useActiveSemester";
@@ -13,7 +14,7 @@ import { useNow, useTimeZone } from "../../src/hooks/useNow";
 import { ApiError } from "../../src/lib/api";
 import { formatStamp } from "../../src/lib/format";
 
-const TYPE_EYEBROW: Record<string, string> = { text: "Metin notu", image: "Fotoğraf notu" };
+const TYPE_EYEBROW: Record<string, string> = { text: "Metin notu", image: "Fotoğraf notu", document: "Belge", link: "Bağlantı" };
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.code === "NETWORK" || err.code === "TIMEOUT" ? "Bağlantı yok, işlem yapılamadı" : err.message;
@@ -181,6 +182,21 @@ export default function NoteScreen() {
                       </View>
                     )}
                   </>
+                ) : note.type === "document" ? (
+                  <DocumentBody note={note} onRetry={() => retry.mutate(undefined, { onError: (e) => setError(errorText(e)) })} retrying={retry.isPending} />
+                ) : note.type === "link" ? (
+                  <View className="gap-3 rounded-2xl border border-line bg-card p-4">
+                    <Text selectable className="font-body text-base leading-6 text-ink">
+                      {note.content.url}
+                    </Text>
+                    <Pressable
+                      onPress={() => void Linking.openURL(note.content.url)}
+                      accessibilityRole="link"
+                      className="min-h-touch justify-center self-start rounded-xl border border-line bg-bg px-4 active:opacity-80"
+                    >
+                      <Text className="font-body-semibold text-base text-ink">Bağlantıyı aç</Text>
+                    </Pressable>
+                  </View>
                 ) : (
                   <View className="rounded-2xl border border-line bg-card p-4">
                     <Text selectable className="font-body text-base leading-6 text-ink">
