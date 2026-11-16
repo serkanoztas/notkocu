@@ -64,6 +64,8 @@ NoteItem    { _id, userId,
               title, content: {...},               // tipe özel alanlar
               extractedText, aiSummary,
               suggestion?: { courseId, weekNo, confidence },  // gelen kutusu için
+              clientId?, capturedAt?,                         // outbox: aynı clientId ikinci not yaratmaz; capturedAt notun alındığı an (createdAt ona eşit)
+              job {...}, suggestJob {...},                    // kuyruk kayıtları, istemciye gitmez
               status: "pending"|"processing"|"ready"|"failed",
               source: "app"|"share-intent",
               tags[], createdAt, updatedAt }
@@ -108,7 +110,7 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 | Tip | İşleme | `extractedText` kaynağı |
 | --- | --- | --- |
 | Metin | Yok (anında `ready`) | Markdown'ın kendisi |
-| Belge | PDF'te metin katmanı okunur; PPTX/DOCX önce PDF'e çevrilir; metni olmayan sayfa Gemini'ye görsel olarak gider | Sayfa sayfa metin |
+| Belge | PDF'te metin katmanı okunur; DOCX/PPTX metni saf JS ile çıkarılır (LibreOffice yok); metin katmanı olmayan ya da çok az olan PDF Gemini'ye PDF olarak gider | Sayfa/slayt/bölüm bazında metin |
 | Görsel | Gemini görsel girdisiyle OCR yapılır ve not düzenli Markdown'a çevrilir | `ocrMarkdown` |
 | Ses | Gemini ses girdisiyle zaman damgalı transkript çıkarılır; ardından bölüm başlıkları ve özet üretilir | Transkript |
 | Link | Sayfa başlığı ve açıklaması çekilir, kısa özet yazılır | Başlık + özet |
@@ -128,7 +130,16 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Worker:** `npm run worker` (ayrı süreç, eşzamanlılık 2, SIGINT/SIGTERM'de düzgün kapanır). Kuyruk ve dosya mantığı `npm run check-queue`, uçtan uca HTTP akışı (worker açıkken) `npm run check-http` ile denenir.
 - **Mobil:** Hızlı yakalamada Fotoğraf aktif (kamera + galeri çoklu seçim, `quality: 0.7`, en fazla 10 fotoğraf). Hafta sayfası, gelen kutusu ve not detayı, `pending/processing` not varken 4 sn'de bir yeniden sorgular, hepsi `ready/failed` olunca durur. Görseller `Authorization` başlığıyla yüklenir (token süresi dolunca bir kez tazelenip yeniden denenir). Çevrimdışı önbellek yalnızca JSON'u saklar; görsel byte'ı Query verisine girmez (Android'in kendi görsel önbelleği uygulama kontrolünde değildir).
 
-**Aşama 4b'de alınan kararlar (uygulandıkça "uygulanan sapmalar" olarak genişler):**
+**Aşama 4b'de uygulanan sapmalar (belge, öneri, outbox, paylaşım):**
+
+- **Belge hattı (`services/documents/`):** yükleme `POST /api/notes` multipart (`type=document`), en fazla 20 MB (görsel 10 MB kalır), tür istemcinin söylediğine göre değil ilk baytlara bakılarak belirlenir: `%PDF-`, zip içinde `word/document.xml` (DOCX) ya da `ppt/presentation.xml` (PPTX); eski `.doc/.ppt` ve diğerleri 400 `UNSUPPORTED_DOCUMENT_TYPE`. Dosya olduğu gibi GridFS'e yazılır, depolama sınırı 4a'daki gibi. Worker: **DOCX** paragraflarını sırayla alır; sayfa kavramı olmadığı için açık sayfa sonlarında (`w:br page`, `lastRenderedPageBreak`) böler, yoksa ~3000 karakterlik bölümlere böler (`unit: "section"`). **PPTX** slaytları `presentation.xml` sırasıyla, konuşmacı notlarıyla birlikte (`unit: "slide"`). **PDF** önce metin katmanından; sayfa başına ortalama < 40 karakter ya da sayfaların yarısından fazlası boşsa PDF taranmış sayılır ve 10 sayfalık parçalar halinde Gemini'ye PDF olarak gider (en çok 60 sayfa, fazlası `TOO_LONG` ile `failed`; parça ~14 MB'ı geçerse Gemini Files API kullanılır ve iş sonunda silinir). Özet her durumda metin üzerinden ayrı, ucuz bir çağrıyla üretilir (ilk ~30k karakter). Sonuç `content.pages[]`, `pageCount`, `unit`, `extractedText` (en çok 300k karakter) ve `aiSummary`. Zip için sıkıştırılmamış boyut sınırı vardır (zip bomb koruması). Gemini ayarları ve log gizliliği 4a ile aynıdır (`services/ai/errors.ts` ortak hata türlerini taşır).
+- **Link notu:** `POST /api/notes` JSON (`type=link`, `url` + isteğe bağlı `title`); yalnızca http/https; sayfa çekilmez ve özetlenmez (SSRF yok, özet sonraya). `extractedText` = başlık + adres.
+- **Gelen kutusu AI önerisi (`suggestJob` hattı):** `status`'a dokunmayan ikinci, bağımsız kuyruk hattı; böylece gelen kutusundaki metin notu "işleniyor" görünmez. Gelen kutusuna düşen (`courseId: null`, `extractedText` var) her not için kuyruğa girer: metin ve link oluşturulunca, görsel/belge işlenince, bir not gelen kutusuna geri taşınınca. Gemini yalnızca dersi seçer (`responseSchema`: ders id'leri + `none`, `confidence`); **hafta AI'dan alınmaz**, notun `capturedAt ?? createdAt` anından `semesterWeekNo` ile hesaplanır (dönem dışıysa öneri yok). `confidence < 0.7` ise öneri saklanmaz. Hat 3 deneme + 429'da 60 sn erteleme kurallarını işleme hattıyla paylaşır, hata sessizdir (kullanıcı dersi kendisi seçer). `POST /api/inbox/approve` öneriyi uygular; "Geri al" mevcut `PATCH {courseId: null}` ile yapılır ve öneri notta kalır; elle atama öneriyi temizler. Notlar `suggesting` alanıyla "öneri hazırlanıyor" durumunu bildirir.
+- **Outbox ve idempotent oluşturma:** "Kaydet" yalnızca cihaza yazar (metin/adres, dosyanın **kopyası** `Paths.document/outbox/<clientId>/` altında, `entry.json` en son yazılır) ve ekranı kapatır; gönderim arka plandadır. Gönderim: uygulama açılışında, ön plana gelince ve bekleyen not varken 30 sn'de bir (arka plan görevi yok, nedeni yukarıda). Bağlantı/zaman aşımı/5xx/429/401'de not saklanır; kalıcı 4xx (`STORAGE_LIMIT`, dosya türü...) notu "Gönderilemedi · neden" olarak işaretler ve kendiliğinden denenmez; silinmiş derse giden not (404) gelen kutusuna düşer. Sunucuda `(userId, clientId)` benzersiz kısmi indeksi: aynı `clientId` ikinci not yaratmaz, var olan not **200** ile döner. `capturedAt` (gelecekte olamaz, şimdiye kırpılır) hedefi ve haftayı belirler; `createdAt = capturedAt` olur. Hedef cihazda Kaydet anında, önbellekteki dönemden çözülür (dönem yoksa sunucu `capturedAt` ile atar). Hafta sayfası ve gelen kutusu gönderilmemiş notları "Gönderilmedi" etiketiyle gösterir; Ayarlar'da sayaç ve "Şimdi gönder" vardır; çıkış yaparken gönderilmemiş not varsa uyarılır ve onaylanırsa silinir. Oturum kendiliğinden düşerse notlar korunur, aynı kullanıcı girince devam eder; farklı kullanıcı girerse silinir.
+- **Paylaş → NotKoçu:** `ShareIntentProvider` kök düzende; oturum açık ve dönem varsa paylaşılan içerikle Hızlı yakalama açılır, hedef olağan kuralla seçilidir, kullanıcı Kaydet'e basar. Eşleme: görsel → Fotoğraf (çoklu), PDF/DOCX/PPTX → Dosya, web adresi → Link (başlık = adresin çevresindeki metin), adressiz düz metin → Metin (alan önceden dolu); karışık içerikte görseller ya da belgeler, desteklenmeyen türde uyarı. Notlar `source: "share-intent"` ile gider ("Paylaşımdan"). Ekran kapanınca paylaşım temizlenir.
+- **Doğrulama araçları:** `npm run check-docs` (çıkarıcılar, çevrimdışı), `check-queue` (kuyruk, öneri hattı, `clientId` indeksi), `check-http` (uçtan uca HTTP; worker döngüsünü süreç içinde çalıştırır ve yalnızca kendi test notlarını alır). `check-http` ve `check-queue` varsayılan olarak **sahte Gemini** kullanır; gerçek istek yalnızca `CHECK_REAL_GEMINI=1` ile atılır. Scriptler yarıda kesilseler de kendi verilerini siler.
+
+**Aşama 4b'de alınan kararlar (paketler ve yapılandırma):**
 
 - **Native paketler tek dev build'de:** `expo-document-picker` (belge seçimi), `expo-sharing` (belgeyi cihazdaki uygulamayla açma), `expo-share-intent` (Paylaş → NotKoçu). Bilerek eklenmeyenler: `expo-network` (bağlantı `/api/health` + AppState + zamanlayıcı ile anlaşılır), `expo-background-task` (Android'de ~15 dk ve güvenilmez; outbox ön plana gelince ve ön plandayken periyodik dener), `expo-crypto` (`clientId` için benzersizlik yeter, güvenlik gerekmez).
 - **expo-share-intent yapılandırması:** eklentinin Android filtreleri yalnızca `text/*`, `image/*`, `video/*`, `*/*` kabul eder (PDF/DOCX/PPTX için ayrı MIME verilemez), bu yüzden `*/*` kullanılır ve desteklenmeyen dosya türü uygulamada reddedilir. iOS share extension'ı bu aşamada `disableIOS: true` ile kapalıdır; iOS aşamasında açılır (bundle id / Apple team gerekir).
@@ -207,12 +218,12 @@ MVP 9 ekrandan oluşur ve hepsinin tıklanabilir mockup'ı hazır: [NotKoçu mob
 - `POST /api/notes` gövdesinde `courseId` yoksa sunucu otomatik atar; `null` gelen kutusu, bir id ise elle atama (`weekNo` zorunlu, ders kullanıcıya ait ve hafta `weekCount` içinde olmalı). Mobil hedefi her zaman açıkça gönderir. Başkasına ait ya da geçersiz id her yerde 404 döner.
 - `GET /api/courses` (liste) yazılmadı: Dersler sekmesi `GET /api/semesters/active` verisini kullanır. `GET /api/today` yalnızca sunucu tarafı özettir (bugünün oturumları, devam eden dersin bu haftaki not sayısı, gelen kutusu sayısı, `tasks: []`); mobil devam eden/sonraki dersleri kendisi hesaplar.
 - Ders sayfasında arama kutusu, Hafta sayfasında "Tipe göre / Zaman çizelgesi" sekmesi ve paylaş butonu yok (tek not tipi var). AI özeti alanı "Özet 5. aşamada" yer tutucusudur. Markdown düz metin olarak gösterilir.
-- Hızlı yakalamada yalnızca Metin aktiftir; diğer 5 tip "yakında" ve pasif. Çevrimdışıyken not kaydedilemez ("Bağlantı yok, not kaydedilemedi"); çevrimdışı not kuyruğu Aşama 4'tedir.
+- Hızlı yakalamada yalnızca Metin aktiftir; diğer 5 tip "yakında" ve pasif. Çevrimdışı not kaydı 4b'de outbox ile çözüldü (aşağıda); ilk halinde çevrimdışıyken not kaydedilemiyordu.
 - Çevrimdışı önbellek: TanStack Query önbelleği `expo-file-system` `File` ile `Paths.document/query-cache.json` dosyasına yazılır (`@tanstack/react-query-persist-client`, saf JS; native paket yok). 7 gün geçerli, uygulama sürümü değişince silinir, çıkışta/oturum kaybında diskten de silinir.
 
 **Otomatik atama kuralı:** Not oluşturulduğunda sunucu, kullanıcının `Session` kayıtlarına bakar. Şu anki gün ve saat bir oturumun **başlangıcından 10 dk önce ile bitişinden 30 dk sonra** arasındaysa not o derse ve o haftaya atanır. Eşleşme yoksa not gelen kutusuna düşer. Hafta numarası `floor((bugün − startDate) / 7) + 1` ile hesaplanır.
 
-**Gelen kutusunda AI önerisi:** Not işlenip `extractedText` çıktıktan sonra Gemini'ye kullanıcının ders listesi ve bu metin verilir. Model `{ courseId, weekNo, confidence }` döner. `confidence < 0.7` ise öneri gösterilmez, kullanıcıdan ders seçmesi istenir.
+**Gelen kutusunda AI önerisi:** Not işlenip `extractedText` çıktıktan sonra Gemini'ye kullanıcının ders listesi ve bu metin verilir. Model yalnızca `{ courseId, confidence }` döner; hafta AI'dan alınmaz, notun alındığı andan hesaplanır (4b sapmaları). `confidence < 0.7` ise öneri gösterilmez, kullanıcıdan ders seçmesi istenir.
 
 ## API endpoint'leri
 
@@ -235,14 +246,14 @@ API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. `/api/health` ve 
 | GET | `/api/courses/:id/weeks/:no` | Haftanın notları ve özeti |
 | POST | `/api/courses/:id/weeks/:no/summary` | Haftalık özeti yeniden üretir |
 | GET | `/api/files/:id` | Kullanıcının kendi dosyasını (görsel ya da küçük resim) akıtır; başkasınınki 404 |
-| POST | `/api/notes` | Not oluşturur; otomatik atamayı yapar. Görsel için multipart (`file`), `pending` olarak kuyruğa girer |
+| POST | `/api/notes` | Not oluşturur; otomatik atamayı yapar. Metin/link: JSON; görsel/belge: multipart (`file`), `pending` olarak kuyruğa girer. `clientId` ve `capturedAt` ile idempotent (tekrarda var olan not 200 döner) |
 | POST | `/api/notes/:id/retry` | `failed` notu yeniden kuyruğa alır |
 | GET | `/api/me/storage` | Kullanılan ve izin verilen depolama alanı (bayt) |
 | GET | `/api/notes/:id` | Not detayı ve işleme durumu |
 | PATCH | `/api/notes/:id` | Düzenleme veya ders/hafta ataması |
 | DELETE | `/api/notes/:id` | Notu ve dosyalarını (görsel + küçük resim) siler |
 | GET | `/api/inbox` | Atanmamış notlar ve AI önerileri |
-| POST | `/api/inbox/approve` | Bir ya da birden çok öneriyi onaylar |
+| POST | `/api/inbox/approve` | `{ noteIds }`: önerisi olan gelen kutusu notlarını önerilen ders ve haftaya atar (`{ approved, skipped }`) |
 | POST | `/api/export/pdf` | Not ya da hafta için PDF üretir, indirme linki döner |
 | POST | `/api/devices` | Expo push token kaydeder |
 
@@ -272,7 +283,7 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 3. [x] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
 4. [ ] **Dosyalar ve işleme:**
    - [x] **4a:** görsel notlar (kamera/galeri), GridFS, Mongo kuyruğu + worker, Gemini OCR, depolama sınırı (Android cihazda test edildi)
-   - [ ] **4b:** belge (PDF/PPTX/DOCX), gelen kutusu + AI ders önerisi, çevrimdışı not kuyruğu (not önce cihaza kaydedilir, bağlantı gelince gönderilir)
+   - [ ] **4b:** belge (PDF/PPTX/DOCX) + link notu, gelen kutusu AI ders önerisi, çevrimdışı not kuyruğu (outbox), Paylaş → NotKoçu (kod tamam; tek dev build ile Android cihaz testi bekliyor)
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test; **preview build'de uçak modunda çevrimdışı açılış doğrulaması** (dev build'de uçak modu Metro'ya erişimi kestiği için test edilemez; 4a'da yalnızca API kapalıyken açılış doğrulandı)
 
@@ -297,7 +308,7 @@ Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomati
 | Ses kaydı izni | Bazı hocalar kayda izin vermiyor | Kayıt öncesi "izin aldım" onayı; kayıtlar sadece kullanıcıya özel |
 | Kişisel veri (KVKK) | Ses ve görsellerde başkalarının sesi ya da yüzü olabilir | Dosyalar özel depoda (GridFS), yalnızca sahibine auth'lu akışla verilir; hesap silinince tüm veri ve dosyalar siliniyor |
 | Mobil arka plan kaydı | Uzun kayıtta iOS/Android uygulamayı durdurabilir | Expo dev build + arka plan ses izni; erken gerçek cihaz testi |
-| Zayıf bağlantı | Sınıfta internet kesilirse not ya da dosya kaybolabilir | Not önce telefona kaydedilir, yükleme kuyruğu bağlantı gelince devam eder |
+| Zayıf bağlantı | Sınıfta internet kesilirse not ya da dosya kaybolabilir | Not önce telefona kaydedilir (outbox), bağlantı gelince kendiliğinden gönderilir; `clientId` ile çift not oluşmaz |
 | Mağaza süreci | App Store incelemesi ve hesap ücreti (Apple yıllık 99 $) | Test için TestFlight ve Android dahili test; mağaza yayını MVP sonrasına |
 
 **Karar bekleyen sorular:**
