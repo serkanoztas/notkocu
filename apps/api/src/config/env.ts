@@ -11,7 +11,10 @@ const schema = z.object({
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
   // No default on purpose: check the current model names in the Gemini docs.
   GEMINI_MODEL: z.string().min(1, "GEMINI_MODEL is required"),
-  // gemini-3.8-flash does not support MINIMAL; use LOW there.
+  // Optional per-task overrides; empty falls back to GEMINI_MODEL.
+  GEMINI_MODEL_OCR: z.string().optional(),
+  GEMINI_MODEL_SCHEDULE: z.string().optional(),
+  // MINIMAL is skipped automatically for models that do not support it.
   // Per-user file storage cap (GridFS), in MB.
   USER_STORAGE_LIMIT_MB: z.coerce.number().positive().default(200),
   GEMINI_THINKING_LEVEL: z.enum(["MINIMAL", "LOW"]).default("MINIMAL"),

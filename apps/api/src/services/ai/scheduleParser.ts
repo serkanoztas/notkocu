@@ -1,4 +1,4 @@
-import { ThinkingLevel, Type, type Schema } from "@google/genai";
+import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import {
   DAY_CODES,
@@ -10,7 +10,7 @@ import {
   type ScheduleTimeSlot,
 } from "@notkocu/shared";
 import { AppError } from "../../utils/AppError";
-import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
+import { geminiTask, getGemini } from "./gemini";
 
 const KINDS = ["teori", "lab", "uygulama"] as const;
 
@@ -162,8 +162,9 @@ export async function parseScheduleImage(
   for (let attempt = 1; attempt <= 2; attempt++) {
     let text: string | undefined;
     try {
+      const { model, thinkingConfig } = geminiTask("schedule");
       const res = await getGemini().models.generateContent({
-        model: geminiModel(),
+        model,
         contents: [
           {
             role: "user",
@@ -179,7 +180,7 @@ export async function parseScheduleImage(
           responseSchema,
           temperature: 0,
           // Reading a table needs no reasoning; thinking only adds latency.
-          thinkingConfig: { thinkingLevel: ThinkingLevel[geminiThinkingLevel()] },
+          thinkingConfig,
         },
       });
       text = res.text;

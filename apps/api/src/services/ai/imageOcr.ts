@@ -1,7 +1,7 @@
-import { ThinkingLevel, Type, type Schema } from "@google/genai";
+import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
+import { geminiTask, getGemini } from "./gemini";
 
 export { OcrError, QuotaError } from "./errors";
 
@@ -43,8 +43,9 @@ export interface OcrResult {
 export async function ocrImage(image: { data: Buffer; mimeType: string }): Promise<OcrResult> {
   let text: string | undefined;
   try {
+    const { model, thinkingConfig } = geminiTask("ocr");
     const res = await getGemini().models.generateContent({
-      model: geminiModel(),
+      model,
       contents: [
         {
           role: "user",
@@ -59,7 +60,7 @@ export async function ocrImage(image: { data: Buffer; mimeType: string }): Promi
         responseMimeType: "application/json",
         responseSchema,
         temperature: 0,
-        thinkingConfig: { thinkingLevel: ThinkingLevel[geminiThinkingLevel()] },
+        thinkingConfig,
       },
     });
     text = res.text;

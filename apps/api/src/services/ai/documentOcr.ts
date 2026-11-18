@@ -1,8 +1,8 @@
-import { FileState, ThinkingLevel, Type, type Part, type Schema } from "@google/genai";
+import { FileState, Type, type Part, type Schema } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
+import { geminiTask, getGemini } from "./gemini";
 
 // Scanned PDFs (no usable text layer) go to Gemini as PDF, in chunks of CHUNK_PAGES pages.
 // Same model / thinking / schema / log-privacy rules as the image OCR. Never log text or bytes.
@@ -64,15 +64,16 @@ async function ocrChunk(bytes: Uint8Array, count: number, forceFilesApi: boolean
     } else {
       pdfPart = { inlineData: { mimeType: "application/pdf", data: Buffer.from(bytes).toString("base64") } };
     }
+    const { model, thinkingConfig } = geminiTask("ocr");
     const res = await ai.models.generateContent({
-      model: geminiModel(),
+      model,
       contents: [{ role: "user", parts: [pdfPart, { text: `Bu PDF ${count} sayfa. Her sayfanın metnini çıkar.` }] }],
       config: {
         systemInstruction: SYSTEM_PROMPT,
         responseMimeType: "application/json",
         responseSchema,
         temperature: 0,
-        thinkingConfig: { thinkingLevel: ThinkingLevel[geminiThinkingLevel()] },
+        thinkingConfig,
       },
     });
     text = res.text;

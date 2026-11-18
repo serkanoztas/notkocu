@@ -1,7 +1,7 @@
-import { ThinkingLevel, Type, type Schema } from "@google/genai";
+import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiModel, geminiThinkingLevel, getGemini } from "./gemini";
+import { geminiTask, getGemini } from "./gemini";
 
 // Text-only summary for documents (cheap): the model never sees the file, only extracted text.
 
@@ -24,15 +24,16 @@ const resultZ = z.object({ summary: z.string() });
 export async function summarizeDocumentText(text: string): Promise<string> {
   let raw: string | undefined;
   try {
+    const { model, thinkingConfig } = geminiTask();
     const res = await getGemini().models.generateContent({
-      model: geminiModel(),
+      model,
       contents: [{ role: "user", parts: [{ text: text.slice(0, MAX_INPUT_CHARS) }] }],
       config: {
         systemInstruction: SYSTEM_PROMPT,
         responseMimeType: "application/json",
         responseSchema,
         temperature: 0,
-        thinkingConfig: { thinkingLevel: ThinkingLevel[geminiThinkingLevel()] },
+        thinkingConfig,
       },
     });
     raw = res.text;

@@ -183,7 +183,7 @@ Kullanıcı OBS'den aldığı ders programı ekran görüntüsünü ya da PDF'in
 - `POST /api/schedule/confirm`: aktif dönem varsa 409 `ACTIVE_SEMESTER_EXISTS`; `replaceActive: true` ile eski dönem silinmez, `isActive=false` olur. `startDate` Pazartesi olmak zorundadır (aksi 400) ve öğlen 12:00 UTC olarak saklanır (her saat diliminde aynı takvim günü). Kullanıcı başına tek aktif dönem, kısmi benzersiz indeksle garanti edilir. Transaction replica set ister (Atlas'ta sorun yok).
 - `GET /api/semesters/active`: aktif dönem + dersler + oturumlar; mobil yalnızca bu istek başarılı dönüp `semester === null` ise onboarding'e yönlendirir, ağ hatası/5xx'te sekmeler açılır ve Bugün ekranında "Program yüklenemedi" + "Tekrar dene" gösterilir.
 - Mobilde tarih `GG.AA.YYYY` girilir, API'ye `YYYY-MM-DD` gider; Pazartesi değilse en yakın Pazartesi önerilir. Görsel kırpma `expo-image-picker`'ın `allowsEditing` seçeneğiyle yapılır (`expo-image-manipulator` eklenmedi).
-- Model adı `GEMINI_MODEL` env'inden gelir. `apps/api` içinde `npm run try-parse -- <görsel>` ile komut satırından denenebilir.
+- Model adı `GEMINI_MODEL` env'inden gelir; görsel/PDF OCR için `GEMINI_MODEL_OCR`, ders programı için `GEMINI_MODEL_SCHEDULE` ile işe göre değiştirilebilir (boşsa `GEMINI_MODEL`). Desteklenmeyen `thinkingLevel` (örn. gemini-3.8-flash'ta MINIMAL) model bazında atlanır. `apps/api` içinde `npm run try-parse -- <görsel>` ile komut satırından denenebilir.
 
 **Prompt'ta açıkça belirtilecek kurallar:**
 
