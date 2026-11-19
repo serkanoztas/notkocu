@@ -142,6 +142,28 @@ async function main() {
     check("durations that do not match the pieces rejected 400", res.status === 400);
     res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(9 * 1024 * 1024)], { type: "audio", inbox: "1" }) });
     check("piece over 8 MB rejected 413", res.status === 413);
+    // end to end: upload -> worker (fake Gemini) -> transcript on the global timeline
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(5000), adts(3000)], { type: "audio", inbox: "1", clientId: "audio-check-0002", chunkDurations: "[600, 300]" }) });
+    const e2e = (await res.json()) as { note: AudioNote };
+    type E2eNote = { status: string; aiSummary?: string; extractedText?: string; content: { transcript?: { startSec: number }[]; chapters?: { startSec: number; title: string }[] } };
+    let e2eNote = null as E2eNote | null;
+    for (let i = 0; i < 40; i++) {
+      const n = ((await (await fetch(base + "/api/notes/" + e2e.note._id, { headers: auth(tokenA) })).json()) as { note: E2eNote }).note;
+      if (n.status === "ready" || n.status === "failed") {
+        e2eNote = n;
+        break;
+      }
+      await sleep(2000);
+    }
+    if (!REAL_GEMINI) {
+      check("audio: worker made it ready with a global-time transcript", e2eNote?.status === "ready" && JSON.stringify(e2eNote.content.transcript?.map((t) => t.startSec)) === "[5,40,605,640]", "status=" + e2eNote?.status);
+      check("audio: chapters, summary and extractedText", (e2eNote?.content.chapters?.length ?? 0) === 2 && !!e2eNote?.aiSummary && !!e2eNote?.extractedText);
+    } else {
+      check("audio: ready with real Gemini (garbage audio may fail)", e2eNote !== null);
+    }
+    res = await fetch(base + "/api/notes/" + e2e.note._id, { method: "DELETE", headers: auth(tokenA) });
+    check("audio: deleted", res.status === 204);
+
     res = await fetch(base + "/api/notes/" + audio.note._id, { method: "DELETE", headers: auth(tokenA) });
     const gone = await fetch(base + "/api/files/" + ac.chunks[0]!.fileKey, { headers: auth(tokenA) });
     const gone2 = await fetch(base + "/api/files/" + ac.chunks[1]!.fileKey, { headers: auth(tokenA) });

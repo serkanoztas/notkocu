@@ -17,7 +17,7 @@ const UNAVAILABLE_MAX_MS = 5 * 60_000;
 export const unavailableDelayMs = (deferrals: number) => Math.min(UNAVAILABLE_BASE_MS * 2 ** deferrals, UNAVAILABLE_MAX_MS);
 
 /** Types the worker knows how to process. */
-const HANDLED_TYPES = ["image", "document"];
+const HANDLED_TYPES = ["image", "document", "audio"];
 
 /** Atomically takes the next due job (or an expired lease). Returns the note with job.attempts already counted. */
 export async function claimNext(extraFilter: Record<string, unknown> = {}) {
@@ -57,9 +57,27 @@ export async function complete(
 ): Promise<boolean> {
   const res = await NoteItemModel.updateOne(owned(note), {
     $set: { status: "ready", extractedText: result.extractedText, aiSummary: result.aiSummary, ...result.set },
-    $unset: { "job.leaseUntil": "", "job.lastError": "" },
+    $unset: { "job.leaseUntil": "", "job.lastError": "", "job.progress": "" },
   });
   return res.modifiedCount > 0;
+}
+
+/**
+ * Long jobs (audio): stores one finished step and pushes the lease out again. Throws when this worker no longer
+ * holds the lease (another one took the job), so the stale worker stops instead of overwriting.
+ */
+export async function saveProgress(note: ClaimedNote, key: string, value: unknown): Promise<void> {
+  const leaseUntil = new Date(Date.now() + LEASE_MS);
+  const res = await NoteItemModel.updateOne(owned(note), { $set: { ["job.progress." + key]: value, "job.leaseUntil": leaseUntil } });
+  if (res.modifiedCount === 0) throw new LeaseLostError();
+  note.set("job.leaseUntil", leaseUntil);
+}
+
+export class LeaseLostError extends Error {
+  constructor() {
+    super("LEASE_LOST");
+    this.name = "LeaseLostError";
+  }
 }
 
 /** Normal failure: retry with backoff, or fail for good after MAX_ATTEMPTS. */

@@ -11,6 +11,8 @@ export interface FakeGemini {
   failNextWith: (status: number) => void;
   /** Calls to `model` fail with `status` until cleared (undefined). */
   failModel: (model: string, status: number | undefined) => void;
+  /** The n-th generateContent call from now (1 = the next one) fails with this status, once. */
+  failOnCall: (n: number, status: number) => void;
   /** Model of every fake call so far, in order. */
   models: () => string[];
   /** Confidence the fake reports for course suggestions (default 0.9). */
@@ -34,10 +36,27 @@ export function setupGemini(): FakeGemini | null {
   let suggestConfidence = 0.9;
   const failing = new Map<string, number>();
   const used: string[] = [];
+  let failAtCall: { call: number; status: number } | undefined;
 
   const answer = (p: Params): unknown => {
     const props = p.config?.responseSchema?.properties ?? {};
     const prompt = p.contents.flatMap((c) => c.parts.map((x) => x.text ?? "")).join("\n");
+    if ("segments" in props) {
+      // Audio piece: two lines inside the piece length given in the prompt ("N saniye").
+      const secs = Number(/(\d+) saniye/.exec(prompt)?.[1] ?? 60);
+      const segments = [{ start: "00:05", text: "Birinci normal form için her hücrede tek değer olmalı." }];
+      if (secs > 40) segments.push({ start: "00:40", text: "İkinci normal form için kısmi bağımlılıkları ayırıyoruz." });
+      return { segments };
+    }
+    if ("chapters" in props) {
+      return {
+        chapters: [
+          { start: "00:00", title: "Giriş" },
+          { start: "10:00", title: "Normal formlar" },
+        ],
+        summary: "Sahte ders özeti: normal formlar anlatıldı.",
+      };
+    }
     if ("pages" in props) {
       const n = Number(/(\d+) sayfa/.exec(prompt)?.[1] ?? 1);
       return { pages: Array.from({ length: n }, () => "# Sistem Analizi\n\nUse case diyagrami") };
@@ -65,6 +84,11 @@ export function setupGemini(): FakeGemini | null {
         used.push(p.model ?? "");
         const modelFail = failing.get(p.model ?? "");
         if (modelFail !== undefined) throw Object.assign(new Error("fake model failure"), { status: modelFail });
+        if (failAtCall && failAtCall.call === calls) {
+          const status = failAtCall.status;
+          failAtCall = undefined;
+          throw Object.assign(new Error("fake failure"), { status });
+        }
         if (failWith !== undefined) {
           const status = failWith;
           failWith = undefined;
@@ -83,6 +107,7 @@ export function setupGemini(): FakeGemini | null {
   return {
     calls: () => calls,
     models: () => used,
+    failOnCall: (n, status) => (failAtCall = { call: calls + n, status }),
     failModel: (m, s) => (s === undefined ? failing.delete(m) : failing.set(m, s)),
     failNextWith: (s) => (failWith = s), setSuggestConfidence: (c) => (suggestConfidence = c) };
 }

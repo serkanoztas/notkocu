@@ -7,6 +7,7 @@ import { semesterWeekNo } from "@notkocu/shared";
 import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
+import { processAudio } from "../src/services/audioProcess";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
 import { processSuggest } from "../src/services/suggest";
 import { claimNextSuggest, completeSuggest, deferSuggest, enqueueSuggest, failSuggest, sweepSuggest } from "../src/services/suggestQueue";
@@ -237,6 +238,56 @@ async function main() {
       await processSuggest((await claimNextSuggest(mine))!);
       const q = (await NoteItemModel.findById(quota._id))?.suggestJob;
       check("processSuggest: 429 -> deferred, attempt not used", q?.state === "pending" && q.attempts === 0 && q.deferrals === 1);
+
+      // --- audio: a failed piece is the only one redone ---
+      {
+        const k0 = await saveFile(userA, Buffer.concat([Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]), Buffer.alloc(300, 1)]), { mime: "audio/aac", filename: "a0.aac" });
+        const k1 = await saveFile(userA, Buffer.concat([Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]), Buffer.alloc(300, 2)]), { mime: "audio/aac", filename: "a1.aac" });
+        const audio = await NoteItemModel.create({
+          userId: userA,
+          courseId: null,
+          type: "audio",
+          title: "Ders kaydı",
+          status: "pending",
+          content: {
+            durationSec: 900,
+            chunks: [
+              { fileKey: k0, startSec: 0, durationSec: 600, size: 307, mime: "audio/aac" },
+              { fileKey: k1, startSec: 600, durationSec: 300, size: 307, mime: "audio/aac" },
+            ],
+          },
+        });
+        const savedFallback = env.GEMINI_FALLBACK_MODEL;
+        env.GEMINI_FALLBACK_MODEL = undefined;
+        const callsBefore = gemini.calls();
+        gemini.failOnCall(2, 503); // piece 0 works, piece 1 hits an overloaded model
+        const first = (await claimNext({ _id: audio._id }))!;
+        const lease0 = +first.job!.leaseUntil!;
+        let threw = "";
+        try {
+          await processAudio(first);
+        } catch (err) {
+          threw = (err as Error).name;
+        }
+        let doc = await NoteItemModel.findById(audio._id);
+        const progress = (doc?.job as { progress?: Record<string, unknown> } | undefined)?.progress ?? {};
+        check("audio: piece 1 failed, piece 0 result is kept", threw === "QuotaError" && "0" in progress && !("1" in progress));
+        check("audio: the lease was extended after the finished piece", +doc!.job!.leaseUntil! > lease0);
+        await defer(first, "unavailable");
+        await NoteItemModel.updateOne({ _id: audio._id }, { "job.runAt": new Date(Date.now() - 1000) });
+        const callsMid = gemini.calls();
+        const again = (await claimNext({ _id: audio._id }))!;
+        check("audio: retry claim keeps the progress", "0" in ((again.job as { progress?: Record<string, unknown> }).progress ?? {}));
+        await processAudio(again);
+        doc = await NoteItemModel.findById(audio._id);
+        const c = doc?.content as { transcript?: { startSec: number; endSec: number; text: string }[]; chapters?: { startSec: number; title: string }[] };
+        check("audio: retry transcribed only piece 1 + chapters (2 calls)", gemini.calls() - callsMid === 2 && callsMid - callsBefore === 2);
+        check("audio: ready, transcript on the global timeline", doc?.status === "ready" && JSON.stringify(c.transcript?.map((t) => t.startSec)) === "[5,40,605,640]");
+        check("audio: segment ends run to the next segment / piece end", c.transcript?.[0]?.endSec === 40 && c.transcript?.[1]?.endSec === 600 && c.transcript?.[2]?.endSec === 640 && c.transcript?.[3]?.endSec === 900);
+        check("audio: chapters + summary + extractedText filled", c.chapters?.length === 2 && !!doc?.aiSummary && /normal form/i.test(doc?.extractedText ?? ""));
+        check("audio: progress bookkeeping cleared", !(doc?.job as { progress?: unknown } | undefined)?.progress);
+        env.GEMINI_FALLBACK_MODEL = savedFallback;
+      }
 
       // --- 503/500: fallback model, then deferral without using attempts ---
       const primary = env.GEMINI_MODEL;

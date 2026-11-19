@@ -1,8 +1,9 @@
 import { OcrError, QuotaError, ocrImage } from "../services/ai/imageOcr";
+import { processAudio } from "../services/audioProcess";
 import { processDocument } from "../services/documents/process";
 import { readFile } from "../services/files";
 import { markWeeksStale } from "../services/notes";
-import { claimNext, complete, defer, fail, sweepExhausted, type ClaimedNote } from "../services/queue";
+import { claimNext, complete, defer, fail, LeaseLostError, sweepExhausted, type ClaimedNote } from "../services/queue";
 import { processSuggest } from "../services/suggest";
 import { claimNextSuggest, enqueueSuggest, sweepSuggest } from "../services/suggestQueue";
 
@@ -51,12 +52,14 @@ async function processNote(note: ClaimedNote): Promise<void> {
     let saved: boolean;
     if (note.type === "image") saved = await processImageNote(note);
     else if (note.type === "document") saved = await processDocumentNote(note);
+    else if (note.type === "audio") saved = await processAudio(note);
     else throw new OcrError("UNSUPPORTED_TYPE");
     if (saved) {
       await markWeeksStale(String(note.userId), [note]);
       await enqueueSuggest(note._id); // inbox notes now have text to suggest a course from
     }
   } catch (err) {
+    if (err instanceof LeaseLostError) return; // another worker owns the job now
     if (err instanceof QuotaError) return defer(note, err.reason);
     const code = err instanceof OcrError ? err.code : "INTERNAL";
     if (!(err instanceof OcrError)) console.error("Worker job failed:", (err as Error).message);

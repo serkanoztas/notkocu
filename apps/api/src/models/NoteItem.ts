@@ -17,6 +17,8 @@ const jobSchema = new Schema(
     runAt: { type: Date, default: () => new Date() },
     leaseUntil: Date,
     lastError: String,
+    // Audio: finished pieces of the transcript by piece index, so a retry only redoes what failed.
+    progress: Schema.Types.Mixed,
   },
   { _id: false },
 );
