@@ -83,7 +83,7 @@ Tipe özel `content` alanları:
 | text | `markdown` |
 | document | `fileKey`, `mime`, `pageCount`, `pages[]` (sayfa başına metin) |
 | image | `fileKey` (işlenmiş görsel), `thumbKey` (~200 px küçük resim, yoksa boş), `mime`, `width`, `height`, `ocrMarkdown` |
-| audio | `fileKey`, `durationSec`, `transcript[]` (zaman damgalı), `chapters[]` |
+| audio | `chunks[]` (`fileKey`, `startSec`, `durationSec`, `size`, `mime`; ~10 dk'lık parçalar), `durationSec`, `transcript[]` (küresel zaman damgalı), `chapters[]`, `audioExpiresAt`, `pinned`, `audioDeleted` |
 | link | `url`, `siteTitle`, `thumbnail` |
 | task | `dueAt`, `remindAt`, `done` |
 | code | `language`, `code` |
@@ -146,6 +146,13 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Native paketler tek dev build'de:** `expo-document-picker` (belge seçimi), `expo-sharing` (belgeyi cihazdaki uygulamayla açma), `expo-share-intent` (Paylaş → NotKoçu). Bilerek eklenmeyenler: `expo-network` (bağlantı `/api/health` + AppState + zamanlayıcı ile anlaşılır), `expo-background-task` (Android'de ~15 dk ve güvenilmez; outbox ön plana gelince ve ön plandayken periyodik dener), `expo-crypto` (`clientId` için benzersizlik yeter, güvenlik gerekmez).
 - **expo-share-intent yapılandırması:** eklentinin Android filtreleri yalnızca `text/*`, `image/*`, `video/*`, `*/*` kabul eder (PDF/DOCX/PPTX için ayrı MIME verilemez), bu yüzden `*/*` kullanılır ve desteklenmeyen dosya türü uygulamada reddedilir. iOS share extension'ı bu aşamada `disableIOS: true` ile kapalıdır; iOS aşamasında açılır (bundle id / Apple team gerekir).
 - **Sunucu kütüphaneleri (native değil):** `unpdf` (PDF metin katmanı), `pdf-lib` (taranmış PDF'i parçalara bölme), `fflate` (zip, boyut sınırlı) ve `fast-xml-parser` (DOCX/PPTX XML). LibreOffice kullanılmaz.
+
+**Aşama 5'te alınan kararlar (ses, saklama, haftalık özet):**
+
+- **Parçalı kayıt:** Mobil kaydı ~10 dk'lık parçalara böler; parçalar sunucuda **birleştirilmez** (sunucuda ffmpeg yok), her biri ayrı GridFS dosyası olarak `content.chunks[]`'ta durur. Gerekçe: kapanmamış tek dosya süreç ölünce bozulur, parça en çok kendi kaybını getirir; parça aynı zamanda Gemini'ye giden birimdir (parça bazında yeniden deneme). Android'de ham ADTS AAC (`.aac`) tercih edilir (kesilen akış çalınabilir kalır); olmazsa `.m4a` + 5 dk parça. Parça geçişinde ~0,2–0,5 sn ses kaybı olabilir. Ayar: mono, 16 kHz, 24 kbps.
+- **Küresel zaman:** Transkript, bölümler ve "satıra dokun → atla" tüm kaydın başından saniye cinsindendir; parça/yerel konum dönüşümü yalnızca `packages/shared/src/audio.ts`'te yapılır (parça sınırına denk gelen zaman sonraki parçayı açar). Oynatıcı bir parça çalarken sonrakini önceden yükler.
+- **Saklama:** Ses dosyaları oluşturma + 30 gün sonra otomatik silinir (**tüm parçalar**); transkript, bölümler ve özet kalıcıdır. "Kalıcı yap" (`pinned`) süresiz tutar ve kotaya sayılır; geri alınabilir: kalıcılık kalkınca `audioExpiresAt = max(şimdi + 7 gün, eski süre)`. Worker günde bir süpürür. Yükleme sınırı kayıt başına 60 MB (en çok 24 parça, parça başı 8 MB).
+- **Haftalık özet:** Yalnızca hafta sayfası açıldığında ve özet yoksa/eskimişse arka planda üretilir; açılmayan haftalar için Gemini çağrısı yapılmaz.
 
 **Haftalık özet:** Haftanın tüm `extractedText` alanları tek bir prompt'ta birleştirilir. Gemini, 3–5 cümlelik özet ve hangi notlardan beslendiğini döner. Uzun ses transkriptlerinde ham metin yerine notun kendi `aiSummary` alanı kullanılır; böylece prompt kısa kalır.
 

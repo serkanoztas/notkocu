@@ -89,11 +89,28 @@ export interface ImageContent {
   height?: number;
   ocrMarkdown?: string;
 }
+/** One recorded piece (~10 min). Pieces are stored separately; times everywhere else are GLOBAL (whole recording). */
+export interface AudioChunk {
+  /** Absent once the audio file has been deleted (retention); the timing stays. */
+  fileKey?: string;
+  /** Start of this piece on the global timeline, seconds. */
+  startSec: number;
+  durationSec: number;
+  size: number;
+  mime: string;
+}
 export interface AudioContent {
-  fileKey: string;
+  chunks: AudioChunk[];
   durationSec?: number;
+  /** Global times, in order. */
   transcript?: { startSec: number; endSec?: number; text: string }[];
   chapters?: { startSec: number; title: string }[];
+  /** When the audio files are deleted automatically (creation + 30 days). Transcript/chapters/summary stay. */
+  audioExpiresAt?: ISODate;
+  /** "Kalıcı yap": the audio is kept without a time limit. */
+  pinned?: boolean;
+  /** The audio files were deleted by retention. */
+  audioDeleted?: boolean;
 }
 export interface LinkContent {
   url: string;
@@ -145,6 +162,18 @@ interface NoteItemBase {
 export type NoteItem = {
   [T in NoteType]: NoteItemBase & { type: T; content: NoteContentByType[T] };
 }[NoteType];
+
+/** What the app gets for a week: the summary text and where it came from. */
+export interface WeekSummaryView {
+  summary: string;
+  /** Notes the summary was built from. */
+  noteIds: Id[];
+  generatedAt?: ISODate;
+  /** True when notes changed after it was generated (a refresh is queued or comes on the next open). */
+  stale: boolean;
+  /** A summary job is queued or running. */
+  generating: boolean;
+}
 
 export interface WeekSummary {
   _id: Id;
@@ -324,6 +353,6 @@ export interface WeekResponse {
   course: Course;
   weekNo: number;
   notes: NoteItem[];
-  /** AI summary; null until stage 5. */
-  summary: WeekSummary | null;
+  /** AI summary; null when the week has no ready notes. */
+  summary: WeekSummaryView | null;
 }
