@@ -251,6 +251,8 @@ export interface ActiveSemesterResponse {
 export interface StorageUsageResponse {
   usedBytes: number;
   limitBytes: number;
+  /** Part of usedBytes: recordings kept with "Kalıcı yap". */
+  pinnedAudioBytes: number;
 }
 
 export interface HealthResponse {

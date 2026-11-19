@@ -81,6 +81,8 @@ noteItemSchema.index({ userId: 1, courseId: 1, createdAt: -1 });
 noteItemSchema.index({ status: 1, "job.runAt": 1 });
 noteItemSchema.index({ status: 1, "job.leaseUntil": 1 });
 noteItemSchema.index({ "suggestJob.state": 1, "suggestJob.runAt": 1 });
+// Daily audio retention sweep: only recordings have a deadline.
+noteItemSchema.index({ "content.audioExpiresAt": 1 }, { partialFilterExpression: { type: "audio" } });
 noteItemSchema.index({ userId: 1, clientId: 1 }, { unique: true, partialFilterExpression: { clientId: { $type: "string" } } });
 
 export const NoteItemModel = model("NoteItem", noteItemSchema);

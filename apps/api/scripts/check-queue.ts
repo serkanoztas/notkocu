@@ -8,6 +8,7 @@ import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
 import { processAudio } from "../src/services/audioProcess";
+import { pinnedAudioBytes, sweepExpiredAudio, unpinDeadline } from "../src/services/audioRetention";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
 import { processSuggest } from "../src/services/suggest";
 import { claimNextSuggest, completeSuggest, deferSuggest, enqueueSuggest, failSuggest, sweepSuggest } from "../src/services/suggestQueue";
@@ -202,6 +203,54 @@ async function main() {
     await NoteItemModel.updateOne({ _id: s4._id }, { suggestJob: { state: "processing", attempts: 3, leaseUntil: new Date(Date.now() - 1000), runAt: new Date() } });
     await sweepSuggest();
     check("sweep closes exhausted expired suggest leases", (await NoteItemModel.findById(s4._id))?.suggestJob?.state === "done");
+
+    // --- audio retention: expired + unpinned -> every piece deleted, transcript stays ---
+    {
+      const piece = async (n: number) =>
+        saveFile(userA, Buffer.concat([Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]), Buffer.alloc(n, 3)]), { mime: "audio/aac", filename: "r.aac" });
+      const day = 24 * 3600 * 1000;
+      const mk = async (over: { expires: number; pinned?: boolean; status?: string }) => {
+        const keys = [await piece(100), await piece(200)];
+        const note = await NoteItemModel.create({
+          userId: userA,
+          courseId: null,
+          type: "audio",
+          title: "Ders kaydı",
+          status: over.status ?? "ready",
+          extractedText: "Normalizasyon anlatıldı",
+          aiSummary: "Özet",
+          content: {
+            durationSec: 900,
+            audioExpiresAt: new Date(Date.now() + over.expires * day),
+            pinned: over.pinned ?? false,
+            transcript: [{ startSec: 5, endSec: 40, text: "Normalizasyon" }],
+            chapters: [{ startSec: 0, title: "Giriş" }],
+            chunks: [
+              { fileKey: keys[0], startSec: 0, durationSec: 600, size: 107, mime: "audio/aac" },
+              { fileKey: keys[1], startSec: 600, durationSec: 300, size: 207, mime: "audio/aac" },
+            ],
+          },
+        });
+        return { note, keys };
+      };
+      const expired = await mk({ expires: -1 });
+      const pinned = await mk({ expires: -1, pinned: true });
+      const fresh = await mk({ expires: 5 });
+      const busy = await mk({ expires: -1, status: "processing" });
+      const swept = await sweepExpiredAudio(mine);
+      const ex = await NoteItemModel.findById(expired.note._id);
+      const exc = ex?.content as { audioDeleted?: boolean; chunks?: { fileKey?: string; startSec: number; durationSec: number }[]; transcript?: unknown[]; chapters?: unknown[] };
+      const gone = (await Promise.all(expired.keys.map((k) => openFile(userA, k)))).every((f) => f === null);
+      check("retention: expired unpinned audio -> all pieces deleted", swept === 1 && gone && exc.audioDeleted === true);
+      check("retention: note, transcript, chapters, summary and piece timing stay", ex?.status === "ready" && ex.aiSummary === "Özet" && exc.transcript?.length === 1 && exc.chapters?.length === 1 && exc.chunks?.length === 2 && exc.chunks[1]!.startSec === 600 && !exc.chunks[0]!.fileKey);
+      const kept = await Promise.all([...pinned.keys, ...fresh.keys, ...busy.keys].map((k) => openFile(userA, k)));
+      check("retention: pinned, not yet expired and still-processing audio are kept", kept.every((f) => f !== null) && (await sweepExpiredAudio(mine)) === 0);
+      check("retention: pinned bytes counted (recordings kept forever)", (await pinnedAudioBytes(userA)) === 314);
+      const t0 = new Date("2026-11-19T12:00:00Z");
+      const soon = unpinDeadline(new Date(+t0 + 2 * day), t0);
+      const later = unpinDeadline(new Date(+t0 + 20 * day), t0);
+      check("unpin: at least 7 days left, or the old deadline if later", +soon === +t0 + 7 * day && +later === +t0 + 20 * day);
+    }
 
     // processSuggest end to end with a real semester/course and the fake model
     if (gemini) {

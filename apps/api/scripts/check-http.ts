@@ -164,6 +164,27 @@ async function main() {
     res = await fetch(base + "/api/notes/" + e2e.note._id, { method: "DELETE", headers: auth(tokenA) });
     check("audio: deleted", res.status === 204);
 
+    // "Kalıcı yap" on / off
+    const patch = (id: string, body: unknown, token = tokenA) =>
+      fetch(base + "/api/notes/" + id, { method: "PATCH", headers: { ...auth(token), "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    res = await patch(audio.note._id, { pinned: true });
+    let pinnedNote = ((await res.json()) as { note: AudioNote }).note;
+    check("pin audio -> pinned", res.status === 200 && pinnedNote.content.pinned === true);
+    res = await fetch(base + "/api/me/storage", { headers: auth(tokenA) });
+    const audioStorage = (await res.json()) as { usedBytes: number; pinnedAudioBytes: number };
+    check("storage shows pinned audio bytes", audioStorage.pinnedAudioBytes === 8014 && audioStorage.usedBytes >= 8014, "pinned=" + audioStorage.pinnedAudioBytes);
+    await NoteItemModel.updateOne({ _id: audio.note._id }, { "content.audioExpiresAt": new Date(Date.now() + 2 * 86_400_000) });
+    res = await patch(audio.note._id, { pinned: false });
+    pinnedNote = ((await res.json()) as { note: AudioNote }).note;
+    const left = (+new Date(pinnedNote.content.audioExpiresAt) - Date.now()) / 86_400_000;
+    check("un-pin -> not pinned, audio kept at least ~7 more days", res.status === 200 && pinnedNote.content.pinned === false && left > 6.9 && left < 7.1, "left=" + left.toFixed(2));
+    res = await patch(audio.note._id, { pinned: true }, tokenB);
+    check("other user cannot pin -> 404", res.status === 404);
+    await NoteItemModel.updateOne({ _id: audio.note._id }, { "content.audioDeleted": true });
+    res = await patch(audio.note._id, { pinned: true });
+    check("pin after the audio was deleted -> 409", res.status === 409);
+    await NoteItemModel.updateOne({ _id: audio.note._id }, { "content.audioDeleted": false });
+
     res = await fetch(base + "/api/notes/" + audio.note._id, { method: "DELETE", headers: auth(tokenA) });
     const gone = await fetch(base + "/api/files/" + ac.chunks[0]!.fileKey, { headers: auth(tokenA) });
     const gone2 = await fetch(base + "/api/files/" + ac.chunks[1]!.fileKey, { headers: auth(tokenA) });

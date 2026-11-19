@@ -2,6 +2,7 @@ import { OcrError, QuotaError, ocrImage } from "../services/ai/imageOcr";
 import { processAudio } from "../services/audioProcess";
 import { processDocument } from "../services/documents/process";
 import { readFile } from "../services/files";
+import { sweepExpiredAudio } from "../services/audioRetention";
 import { markWeeksStale } from "../services/notes";
 import { claimNext, complete, defer, fail, LeaseLostError, sweepExhausted, type ClaimedNote } from "../services/queue";
 import { processSuggest } from "../services/suggest";
@@ -12,6 +13,7 @@ import { claimNextSuggest, enqueueSuggest, sweepSuggest } from "../services/sugg
 
 const IDLE_MS = 2_000;
 const SWEEP_EVERY_MS = 30_000;
+const RETENTION_EVERY_MS = 24 * 3600_000; // audio files older than 30 days (idempotent, so several workers are harmless)
 const DEFAULT_IMAGE_TITLE = "Fotoğraf";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -79,12 +81,18 @@ export function startWorker(opts: WorkerOptions): { stop: () => Promise<void> } 
 
   async function loop(index: number): Promise<void> {
     let lastSweep = 0;
+    let lastRetention = 0;
     while (!stopping) {
       try {
         if (index === 0 && Date.now() - lastSweep > SWEEP_EVERY_MS) {
           lastSweep = Date.now();
           await sweepExhausted();
           await sweepSuggest();
+        }
+        if (index === 0 && Date.now() - lastRetention > RETENTION_EVERY_MS) {
+          lastRetention = Date.now();
+          const n = await sweepExpiredAudio(opts.claimFilter);
+          if (n > 0) console.log(`Retention: audio files deleted for ${n} recording(s)`);
         }
         // Processing (OCR, text extraction) first; course suggestions only when nothing else is waiting.
         const note = await claimNext(opts.claimFilter);

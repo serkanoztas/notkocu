@@ -14,6 +14,7 @@ import {
 import { requireAuth } from "../middleware/requireAuth";
 import { NoteItemModel } from "../models";
 import { assertWithinLimit, deleteFiles, saveFile } from "../services/files";
+import { unpinDeadline } from "../services/audioRetention";
 import { estimateDurationSec, sniffAudio } from "../services/audioSniff";
 import { sniffDocument } from "../services/documents/sniff";
 import { DOCUMENT_MIME } from "../services/documents/types";
@@ -131,6 +132,7 @@ const updateBody = z
     markdown: markdown.optional(),
     courseId: objectIdLike.nullable().optional(),
     weekNo: z.number().int().min(1).max(60).optional(),
+    pinned: z.boolean().optional(), // audio: "Kalıcı yap" on/off
   })
   .refine((b) => typeof b.courseId !== "string" || b.weekNo !== undefined, {
     message: "weekNo is required when courseId is set",
@@ -442,6 +444,16 @@ notesRouter.patch(
       note.extractedText = body.markdown;
       note.set("suggestion", undefined); // the old suggestion was for the old text
       note.set("suggestJob", undefined);
+    }
+    if (body.pinned !== undefined) {
+      const audio = note.content as { audioDeleted?: boolean; audioExpiresAt?: Date; pinned?: boolean };
+      if (note.type !== "audio") throw new AppError(400, "Yalnızca ses kayıtları kalıcı yapılabilir", "NOT_EDITABLE");
+      if (audio.audioDeleted) throw new AppError(409, "Ses dosyası silindi", "AUDIO_DELETED");
+      // Atomic field update (not note.save()): the worker may be writing the transcript into `content` right now.
+      // Un-pinning keeps the audio at least a few more days; it is never deleted at once.
+      const set: Record<string, unknown> = { "content.pinned": body.pinned };
+      if (!body.pinned && audio.pinned) set["content.audioExpiresAt"] = unpinDeadline(audio.audioExpiresAt);
+      await NoteItemModel.updateOne({ _id: note._id, userId, "content.audioDeleted": { $ne: true } }, { $set: set });
     }
     if (body.title !== undefined) {
       note.title = body.title || titleFromMarkdown(body.markdown ?? note.extractedText ?? "");

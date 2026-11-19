@@ -3,6 +3,7 @@ import type { MeResponse, StorageUsageResponse } from "@notkocu/shared";
 import { requireAuth } from "../middleware/requireAuth";
 import { UserModel } from "../models";
 import { deleteUserData } from "../services/account";
+import { pinnedAudioBytes } from "../services/audioRetention";
 import { getUsage, storageLimitBytes } from "../services/files";
 import { AppError } from "../utils/AppError";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -20,7 +21,8 @@ meRouter.get("/", asyncHandler(async (req, res) => {
 }));
 
 meRouter.get("/storage", asyncHandler(async (req, res) => {
-  const body: StorageUsageResponse = { usedBytes: await getUsage(req.userId), limitBytes: storageLimitBytes() };
+  const [usedBytes, pinnedAudio] = await Promise.all([getUsage(req.userId), pinnedAudioBytes(req.userId)]);
+  const body: StorageUsageResponse = { usedBytes, limitBytes: storageLimitBytes(), pinnedAudioBytes: pinnedAudio };
   res.json(body);
 }));
 
