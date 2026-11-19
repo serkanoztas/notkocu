@@ -47,6 +47,14 @@
           "androidMultiIntentFilters": ["image/*", "*/*"],
           "disableIOS": true
         }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Ders kaydı yapabilmek için mikrofon erişimi gerekir.",
+          "enableBackgroundRecording": true,
+          "enableBackgroundPlayback": true
+        }
       ]
     ],
     "scheme": "notkocu",
