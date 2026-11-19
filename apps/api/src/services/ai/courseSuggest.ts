@@ -1,7 +1,7 @@
 import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiTask, getGemini } from "./gemini";
+import { generateContent, geminiTask } from "./gemini";
 
 // "Which of the student's courses does this inbox note belong to?" Only the course is asked: the week
 // is computed from the note's own date, never by the model. Never log the note text or the response.
@@ -53,7 +53,7 @@ export async function suggestCourse(input: { title: string; text: string; course
   let raw: string | undefined;
   try {
     const { model, thinkingConfig } = geminiTask();
-    const res = await getGemini().models.generateContent({
+    const res = await generateContent({
       model,
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {

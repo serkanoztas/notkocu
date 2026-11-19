@@ -1,7 +1,7 @@
 import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiTask, getGemini } from "./gemini";
+import { generateContent, geminiTask } from "./gemini";
 
 // Text-only summary for documents (cheap): the model never sees the file, only extracted text.
 
@@ -25,7 +25,7 @@ export async function summarizeDocumentText(text: string): Promise<string> {
   let raw: string | undefined;
   try {
     const { model, thinkingConfig } = geminiTask();
-    const res = await getGemini().models.generateContent({
+    const res = await generateContent({
       model,
       contents: [{ role: "user", parts: [{ text: text.slice(0, MAX_INPUT_CHARS) }] }],
       config: {

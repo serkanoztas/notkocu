@@ -29,7 +29,7 @@ export async function processSuggest(note: ClaimedSuggest): Promise<void> {
     if (!guess.courseId || guess.confidence < SUGGEST_MIN_CONFIDENCE) return completeSuggest(note, null);
     return completeSuggest(note, { courseId: guess.courseId, weekNo, confidence: guess.confidence });
   } catch (err) {
-    if (err instanceof QuotaError) return deferSuggest(note);
+    if (err instanceof QuotaError) return deferSuggest(note, err.reason);
     const code = err instanceof OcrError ? err.code : "INTERNAL";
     if (!(err instanceof OcrError)) console.error("Suggest job failed:", (err as Error).message);
     return failSuggest(note, code);

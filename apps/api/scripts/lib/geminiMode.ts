@@ -9,6 +9,10 @@ export interface FakeGemini {
   calls: () => number;
   /** Next generateContent call fails with this HTTP status (e.g. 429) once. */
   failNextWith: (status: number) => void;
+  /** Calls to `model` fail with `status` until cleared (undefined). */
+  failModel: (model: string, status: number | undefined) => void;
+  /** Model of every fake call so far, in order. */
+  models: () => string[];
   /** Confidence the fake reports for course suggestions (default 0.9). */
   setSuggestConfidence: (c: number) => void;
 }
@@ -28,6 +32,8 @@ export function setupGemini(): FakeGemini | null {
   let calls = 0;
   let failWith: number | undefined;
   let suggestConfidence = 0.9;
+  const failing = new Map<string, number>();
+  const used: string[] = [];
 
   const answer = (p: Params): unknown => {
     const props = p.config?.responseSchema?.properties ?? {};
@@ -54,8 +60,11 @@ export function setupGemini(): FakeGemini | null {
 
   const fake = {
     models: {
-      generateContent: async (p: Params) => {
+      generateContent: async (p: Params & { model?: string }) => {
         calls += 1;
+        used.push(p.model ?? "");
+        const modelFail = failing.get(p.model ?? "");
+        if (modelFail !== undefined) throw Object.assign(new Error("fake model failure"), { status: modelFail });
         if (failWith !== undefined) {
           const status = failWith;
           failWith = undefined;
@@ -71,5 +80,9 @@ export function setupGemini(): FakeGemini | null {
     },
   };
   setGeminiOverride(fake);
-  return { calls: () => calls, failNextWith: (s) => (failWith = s), setSuggestConfidence: (c) => (suggestConfidence = c) };
+  return {
+    calls: () => calls,
+    models: () => used,
+    failModel: (m, s) => (s === undefined ? failing.delete(m) : failing.set(m, s)),
+    failNextWith: (s) => (failWith = s), setSuggestConfidence: (c) => (suggestConfidence = c) };
 }

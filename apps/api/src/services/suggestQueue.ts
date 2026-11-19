@@ -1,5 +1,5 @@
 import { NoteItemModel } from "../models";
-import { MAX_ATTEMPTS, MAX_DEFERRALS } from "./queue";
+import { MAX_ATTEMPTS, MAX_DEFERRALS, MAX_UNAVAILABLE_DEFERRALS, unavailableDelayMs } from "./queue";
 
 // Queue lane for course suggestions (see NoteItem.suggestJob). Same rules as the processing lane
 // (atomic claim with a lease, 3 attempts with backoff, quota waits do not use up attempts), but it
@@ -77,17 +77,20 @@ export async function failSuggest(note: ClaimedSuggest, errorCode: string): Prom
   });
 }
 
-/** Provider quota (429): wait ~60 s without using an attempt (bounded by MAX_DEFERRALS). */
-export async function deferSuggest(note: ClaimedSuggest): Promise<void> {
-  if ((note.suggestJob?.deferrals ?? 0) + 1 > MAX_DEFERRALS) {
+/** Quota (429) or overloaded model (500/503): wait without using an attempt; same bounds as the processing lane. */
+export async function deferSuggest(note: ClaimedSuggest, reason: "quota" | "unavailable" = "quota"): Promise<void> {
+  const deferrals = note.suggestJob?.deferrals ?? 0;
+  const unavailable = reason === "unavailable";
+  if (deferrals + 1 > (unavailable ? MAX_UNAVAILABLE_DEFERRALS : MAX_DEFERRALS)) {
     await NoteItemModel.updateOne(owned(note), {
-      $set: { "suggestJob.state": "done", "suggestJob.lastError": "QUOTA_EXHAUSTED" },
+      $set: { "suggestJob.state": "done", "suggestJob.lastError": unavailable ? "AI_UNAVAILABLE" : "QUOTA_EXHAUSTED" },
       $unset: { "suggestJob.leaseUntil": "" },
     });
     return;
   }
+  const delay = unavailable ? unavailableDelayMs(deferrals) : QUOTA_DELAY_MS;
   await NoteItemModel.updateOne(owned(note), {
-    $set: { "suggestJob.state": "pending", "suggestJob.lastError": "QUOTA", "suggestJob.runAt": new Date(Date.now() + QUOTA_DELAY_MS) },
+    $set: { "suggestJob.state": "pending", "suggestJob.lastError": unavailable ? "AI_UNAVAILABLE" : "QUOTA", "suggestJob.runAt": new Date(Date.now() + delay) },
     $inc: { "suggestJob.attempts": -1, "suggestJob.deferrals": 1 },
     $unset: { "suggestJob.leaseUntil": "" },
   });

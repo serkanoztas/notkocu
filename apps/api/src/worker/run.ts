@@ -57,7 +57,7 @@ async function processNote(note: ClaimedNote): Promise<void> {
       await enqueueSuggest(note._id); // inbox notes now have text to suggest a course from
     }
   } catch (err) {
-    if (err instanceof QuotaError) return defer(note);
+    if (err instanceof QuotaError) return defer(note, err.reason);
     const code = err instanceof OcrError ? err.code : "INTERNAL";
     if (!(err instanceof OcrError)) console.error("Worker job failed:", (err as Error).message);
     await fail(note, code);

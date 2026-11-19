@@ -35,6 +35,32 @@ export function geminiThinkingConfig(model: string) {
   return { thinkingLevel: ThinkingLevel[level] };
 }
 
+type GenerateParams = Parameters<GoogleGenAI["models"]["generateContent"]>[0];
+
+/**
+ * generateContent with a one-shot fallback model: a 500/503 from the primary model is retried at once
+ * with GEMINI_FALLBACK_MODEL. If that fails too, its error is thrown and the queue rules take over.
+ * Logs only model names and the status, never content.
+ */
+export async function generateContent(params: GenerateParams) {
+  const ai = getGemini();
+  try {
+    return await ai.models.generateContent(params);
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    const fallback = env.GEMINI_FALLBACK_MODEL;
+    if ((status !== 500 && status !== 503) || !fallback || fallback === params.model) throw err;
+    console.warn(`Gemini ${params.model} failed (status ${status}), retrying with fallback ${fallback}`);
+    const res = await ai.models.generateContent({
+      ...params,
+      model: fallback,
+      config: { ...params.config, thinkingConfig: geminiThinkingConfig(fallback) },
+    });
+    console.warn(`Gemini fallback ${fallback} succeeded`);
+    return res;
+  }
+}
+
 /** Model + thinkingConfig for one task, to use in generateContent. */
 export function geminiTask(task: GeminiTask = "default") {
   const model = geminiModel(task);

@@ -237,6 +237,64 @@ async function main() {
       await processSuggest((await claimNextSuggest(mine))!);
       const q = (await NoteItemModel.findById(quota._id))?.suggestJob;
       check("processSuggest: 429 -> deferred, attempt not used", q?.state === "pending" && q.attempts === 0 && q.deferrals === 1);
+
+      // --- 503/500: fallback model, then deferral without using attempts ---
+      const primary = env.GEMINI_MODEL;
+      env.GEMINI_FALLBACK_MODEL = "fake-fallback-model";
+      try {
+        gemini.failModel(primary, 503);
+        const before = gemini.models().length;
+        const fb = await textNote();
+        await enqueueSuggest(fb._id);
+        await processSuggest((await claimNextSuggest(mine))!);
+        const fbModels = gemini.models().slice(before);
+        const fbDone = (await NoteItemModel.findById(fb._id))?.suggestJob;
+        check("primary 503 -> same request retried once with the fallback model", fbModels.length === 2 && fbModels[0] === primary && fbModels[1] === "fake-fallback-model");
+        check("primary 503 + fallback ok -> job completed, no deferral", fbDone?.state === "done" && !fbDone.deferrals);
+        gemini.failModel(primary, undefined);
+
+        gemini.failModel(primary, 500);
+        const before500 = gemini.models().length;
+        const fb500 = await textNote();
+        await enqueueSuggest(fb500._id);
+        await processSuggest((await claimNextSuggest(mine))!);
+        check("primary 500 also falls back", gemini.models().slice(before500).join() === `${primary},fake-fallback-model` && (await NoteItemModel.findById(fb500._id))?.suggestJob?.state === "done");
+        gemini.failModel(primary, undefined);
+
+        gemini.failModel(primary, 503);
+        gemini.failModel("fake-fallback-model", 503);
+        const down = await textNote();
+        await enqueueSuggest(down._id);
+        await processSuggest((await claimNextSuggest(mine))!);
+        let d = (await NoteItemModel.findById(down._id))?.suggestJob;
+        const wait1 = +d!.runAt! - Date.now();
+        check("both 503 -> deferred, attempts not increased, ~10 s first", d?.state === "pending" && d.attempts === 0 && d.deferrals === 1 && wait1 > 5_000 && wait1 < 15_000);
+        await NoteItemModel.updateOne({ _id: down._id }, { "suggestJob.runAt": new Date(Date.now() - 1000) });
+        await processSuggest((await claimNextSuggest(mine))!);
+        d = (await NoteItemModel.findById(down._id))?.suggestJob;
+        const wait2 = +d!.runAt! - Date.now();
+        check("2nd deferral waits longer (~20 s), attempts still 0", d?.attempts === 0 && d.deferrals === 2 && wait2 > 15_000 && wait2 < 25_000);
+
+        // after 10 deferrals the job gives up (suggest lane ends silently as "done")
+        await NoteItemModel.updateOne({ _id: down._id }, { "suggestJob.runAt": new Date(Date.now() - 1000), "suggestJob.deferrals": 10 });
+        await processSuggest((await claimNextSuggest(mine))!);
+        d = (await NoteItemModel.findById(down._id))?.suggestJob;
+        check("deferral cap (10) reached -> gives up", d?.state === "done" && d.lastError === "AI_UNAVAILABLE");
+
+        // processing lane: same rules through queue.defer
+        const img = await newImageNote(userA);
+        const claimedImg = (await claimNext({ _id: img._id }))!;
+        await defer(claimedImg, "unavailable");
+        let nd = (await NoteItemModel.findById(img._id))?.job;
+        check("processing lane: 503 defer -> pending, attempts back to 0, ~10 s", nd?.attempts === 0 && nd.deferrals === 1 && +nd.runAt! - Date.now() < 15_000);
+        await NoteItemModel.updateOne({ _id: img._id }, { "job.runAt": new Date(Date.now() - 1000), "job.deferrals": 10 });
+        await defer((await claimNext({ _id: img._id }))!, "unavailable");
+        check("processing lane: deferral cap (10) -> failed AI_UNAVAILABLE", (await NoteItemModel.findById(img._id))?.status === "failed");
+      } finally {
+        gemini.failModel(primary, undefined);
+        gemini.failModel("fake-fallback-model", undefined);
+        env.GEMINI_FALLBACK_MODEL = undefined;
+      }
     }
     }
   } finally {

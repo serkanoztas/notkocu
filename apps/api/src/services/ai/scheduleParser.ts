@@ -10,7 +10,7 @@ import {
   type ScheduleTimeSlot,
 } from "@notkocu/shared";
 import { AppError } from "../../utils/AppError";
-import { geminiTask, getGemini } from "./gemini";
+import { generateContent, geminiTask } from "./gemini";
 
 const KINDS = ["teori", "lab", "uygulama"] as const;
 
@@ -163,7 +163,7 @@ export async function parseScheduleImage(
     let text: string | undefined;
     try {
       const { model, thinkingConfig } = geminiTask("schedule");
-      const res = await getGemini().models.generateContent({
+      const res = await generateContent({
         model,
         contents: [
           {

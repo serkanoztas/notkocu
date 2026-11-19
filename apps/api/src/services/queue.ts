@@ -9,6 +9,12 @@ export const MAX_DEFERRALS = 30; // ~30 min of quota waiting, then give up
 const LEASE_MS = 3 * 60_000;
 const BACKOFF_MS = 30_000;
 const QUOTA_DELAY_MS = 60_000;
+// Overloaded model (500/503): start short, grow, give up after 10 deferrals (~30 min in total).
+export const MAX_UNAVAILABLE_DEFERRALS = 10;
+const UNAVAILABLE_BASE_MS = 10_000;
+const UNAVAILABLE_MAX_MS = 5 * 60_000;
+/** Delay before the next try, given how many deferrals the job already had: 10 s, 20 s, 40 s ... capped at 5 min. */
+export const unavailableDelayMs = (deferrals: number) => Math.min(UNAVAILABLE_BASE_MS * 2 ** deferrals, UNAVAILABLE_MAX_MS);
 
 /** Types the worker knows how to process. */
 const HANDLED_TYPES = ["image", "document"];
@@ -68,17 +74,23 @@ export async function fail(note: ClaimedNote, errorCode: string): Promise<void> 
   });
 }
 
-/** Provider quota (429): wait ~60 s without using up an attempt (bounded by MAX_DEFERRALS). */
-export async function defer(note: ClaimedNote): Promise<void> {
-  if ((note.job?.deferrals ?? 0) + 1 > MAX_DEFERRALS) {
+/**
+ * Provider quota (429): wait ~60 s without using up an attempt (bounded by MAX_DEFERRALS).
+ * Overloaded model (500/503): same, but 10 s first, growing, bounded by MAX_UNAVAILABLE_DEFERRALS.
+ */
+export async function defer(note: ClaimedNote, reason: "quota" | "unavailable" = "quota"): Promise<void> {
+  const deferrals = note.job?.deferrals ?? 0;
+  const unavailable = reason === "unavailable";
+  if (deferrals + 1 > (unavailable ? MAX_UNAVAILABLE_DEFERRALS : MAX_DEFERRALS)) {
     await NoteItemModel.updateOne(owned(note), {
-      $set: { status: "failed", "job.lastError": "QUOTA_EXHAUSTED" },
+      $set: { status: "failed", "job.lastError": unavailable ? "AI_UNAVAILABLE" : "QUOTA_EXHAUSTED" },
       $unset: { "job.leaseUntil": "" },
     });
     return;
   }
+  const delay = unavailable ? unavailableDelayMs(deferrals) : QUOTA_DELAY_MS;
   await NoteItemModel.updateOne(owned(note), {
-    $set: { status: "pending", "job.lastError": "QUOTA", "job.runAt": new Date(Date.now() + QUOTA_DELAY_MS) },
+    $set: { status: "pending", "job.lastError": unavailable ? "AI_UNAVAILABLE" : "QUOTA", "job.runAt": new Date(Date.now() + delay) },
     $inc: { "job.attempts": -1, "job.deferrals": 1 },
     $unset: { "job.leaseUntil": "" },
   });

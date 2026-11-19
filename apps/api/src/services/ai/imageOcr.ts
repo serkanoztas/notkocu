@@ -1,7 +1,7 @@
 import { Type, type Schema } from "@google/genai";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
-import { geminiTask, getGemini } from "./gemini";
+import { generateContent, geminiTask } from "./gemini";
 
 export { OcrError, QuotaError } from "./errors";
 
@@ -44,7 +44,7 @@ export async function ocrImage(image: { data: Buffer; mimeType: string }): Promi
   let text: string | undefined;
   try {
     const { model, thinkingConfig } = geminiTask("ocr");
-    const res = await getGemini().models.generateContent({
+    const res = await generateContent({
       model,
       contents: [
         {
