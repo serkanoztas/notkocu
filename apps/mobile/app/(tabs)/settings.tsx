@@ -76,6 +76,9 @@ export default function SettingsScreen() {
               {formatMb(storage.data.usedBytes)} / {formatMb(storage.data.limitBytes)}
             </Text>
           </View>
+          {storage.data.pinnedAudioBytes > 0 ? (
+            <Text className="mt-2 font-body text-sm text-muted">Kalıcı sesler: {formatMb(storage.data.pinnedAudioBytes)}</Text>
+          ) : null}
           <View className="mt-3 h-2 overflow-hidden rounded-full bg-line">
             <View
               className={`h-2 rounded-full ${storage.data.usedBytes / storage.data.limitBytes > 0.9 ? "bg-red-600" : "bg-primary"}`}

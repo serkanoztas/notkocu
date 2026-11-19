@@ -24,8 +24,18 @@ export const useWeek = (id: string, weekNo: number) =>
     queryKey: ["week", id, weekNo],
     queryFn: () => api.week(id, weekNo),
     enabled: !!id && weekNo > 0,
-    refetchInterval: (q) => (isActive(q.state.data?.notes) ? POLL_MS : false),
+    // Also while the weekly summary is being written (opening the page queued it).
+    refetchInterval: (q) => (isActive(q.state.data?.notes) || q.state.data?.summary?.generating ? POLL_MS : false),
   });
+
+/** "Tekrar dene" on the summary card: queues a fresh summary job. */
+export function useRefreshWeekSummary(id: string, weekNo: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.refreshWeekSummary(id, weekNo),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["week", id, weekNo] }),
+  });
+}
 
 export const useNote = (id: string) =>
   useQuery({

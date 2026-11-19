@@ -138,7 +138,7 @@ function WeekCard(props: {
         <Text className="font-body text-sm text-muted">{weekRangeLabel(props.semesterStart, props.weekNo)}</Text>
       </View>
       <Text className="mt-3 font-body text-base text-muted">
-        {props.count > 0 ? `${props.count} not` : "Bu haftada henüz not yok."} · Özet 5. aşamada
+        {props.count > 0 ? `${props.count} not` : "Bu haftada henüz not yok."}
       </Text>
       <Pressable onPress={() => props.onOpen(props.weekNo)} className="mt-4 min-h-touch justify-center self-start">
         <Text className="font-body-semibold text-base text-primary">Haftayı aç →</Text>

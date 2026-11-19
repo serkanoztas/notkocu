@@ -197,6 +197,9 @@ export const api = {
   inbox: () => request<InboxResponse>("/api/inbox"),
   course: (id: string) => request<CourseDetailResponse>(`/api/courses/${id}`),
   week: (id: string, weekNo: number) => request<WeekResponse>(`/api/courses/${id}/weeks/${weekNo}`),
+  /** Queues a new summary for the week even if the old one is not stale. */
+  refreshWeekSummary: (id: string, weekNo: number) =>
+    request<{ summary: WeekResponse["summary"] }>(`/api/courses/${id}/weeks/${weekNo}/summary`, { method: "POST", timeoutMs: 15000 }),
   note: (id: string) => request<NoteResponse>(`/api/notes/${id}`),
   createNote: (body: CreateNoteRequest) =>
     request<NoteResponse>("/api/notes", { method: "POST", body, timeoutMs: 15000 }),
