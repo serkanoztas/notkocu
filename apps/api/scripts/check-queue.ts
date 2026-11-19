@@ -4,13 +4,17 @@ import mongoose from "mongoose";
 import sharp from "sharp";
 import { env } from "../src/config/env";
 import { semesterWeekNo } from "@notkocu/shared";
-import { CourseModel, NoteItemModel, SemesterModel } from "../src/models";
+import { CourseModel, NoteItemModel, SemesterModel, WeekSummaryModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
 import { processAudio } from "../src/services/audioProcess";
 import { pinnedAudioBytes, sweepExpiredAudio, unpinDeadline } from "../src/services/audioRetention";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
+import { buildWeekInput } from "../src/services/ai/weekSummary";
+import { markWeeksStale } from "../src/services/notes";
 import { processSuggest } from "../src/services/suggest";
+import { processWeekSummary, weekSummaryView } from "../src/services/weekSummary";
+import { claimNextWeekSummary } from "../src/services/weekSummaryQueue";
 import { claimNextSuggest, completeSuggest, deferSuggest, enqueueSuggest, failSuggest, sweepSuggest } from "../src/services/suggestQueue";
 import { setupGemini } from "./lib/geminiMode";
 
@@ -30,6 +34,7 @@ async function cleanup() {
   await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
   await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await WeekSummaryModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
 }
@@ -287,6 +292,60 @@ async function main() {
       await processSuggest((await claimNextSuggest(mine))!);
       const q = (await NoteItemModel.findById(quota._id))?.suggestJob;
       check("processSuggest: 429 -> deferred, attempt not used", q?.state === "pending" && q.attempts === 0 && q.deferrals === 1);
+
+      // --- weekly summary lane ---
+      {
+        const wk = 5;
+        const where = { userId: userA, courseId: course._id, weekNo: wk };
+        check("week summary: nothing ready -> no summary, no job", (await weekSummaryView(userA, course._id, wk, false)) === null && (await WeekSummaryModel.countDocuments(where)) === 0);
+        const t1 = await NoteItemModel.create({ ...where, type: "text", title: "2NF örnekleri", status: "ready", extractedText: "İkinci normal form kısmi bağımlılıkları kaldırır.", content: { markdown: "x" } });
+        const a1 = await NoteItemModel.create({ ...where, type: "audio", title: "Ders kaydı", status: "ready", aiSummary: "Hoca normalizasyonu ve quiz duyurusunu anlattı.", extractedText: "HAM-TRANSKRIPT ".repeat(500), content: { chunks: [] } });
+        const v1 = await weekSummaryView(userA, course._id, wk, true);
+        check("week summary: first open queues a job, shows 'generating'", v1?.generating === true && v1.summary === "" && (await WeekSummaryModel.countDocuments(where)) === 1);
+        await weekSummaryView(userA, course._id, wk, true);
+        await weekSummaryView(userA, course._id, wk, true);
+        check("week summary: opening again does not queue again", (await WeekSummaryModel.countDocuments({ ...where, "job.state": "pending" })) === 1 && (await WeekSummaryModel.findOne(where))?.job?.attempts === 0);
+
+        const input = buildWeekInput([
+          { id: "t", type: "text", title: "2NF", extractedText: "metin", aiSummary: null },
+          { id: "a", type: "audio", title: "Ders kaydı", aiSummary: "kayıt özeti", extractedText: "HAM-TRANSKRIPT" },
+          { id: "e", type: "audio", title: "Boş ses", aiSummary: null, extractedText: "HAM-TRANSKRIPT" },
+        ]);
+        check("week summary input: audio contributes its summary, never the raw transcript", input.text.includes("kayıt özeti") && !input.text.includes("HAM-TRANSKRIPT") && input.noteIds.join() === "t,a");
+
+        const callsBefore = gemini.calls();
+        const job = (await claimNextWeekSummary(mine))!;
+        await processWeekSummary(job);
+        const done = await WeekSummaryModel.findOne(where);
+        check("week summary: processed, sources are the notes that fed it", done?.job?.state === "done" && !!done.summary && done.stale === false && done.noteIds.map(String).sort().join() === [String(t1._id), String(a1._id)].sort().join() && gemini.calls() - callsBefore === 1);
+        const v2 = await weekSummaryView(userA, course._id, wk, true);
+        check("week summary: fresh summary is shown and not regenerated", v2?.generating === false && !!v2.summary && v2.stale === false && (await WeekSummaryModel.findOne(where))?.job?.state === "done");
+
+        await markWeeksStale(userA, [{ courseId: course._id, weekNo: wk }]);
+        const v3 = await weekSummaryView(userA, course._id, wk, true);
+        check("week summary: stale -> queued again, old text stays visible", v3?.generating === true && v3.stale === true && !!v3.summary);
+        const oldText = done!.summary;
+        const keepFallback = env.GEMINI_FALLBACK_MODEL; // a fallback from .env would rescue the fake 503
+        env.GEMINI_FALLBACK_MODEL = undefined;
+        gemini.failModel(env.GEMINI_MODEL, 503);
+        const again = (await claimNextWeekSummary(mine))!;
+        await processWeekSummary(again);
+        gemini.failModel(env.GEMINI_MODEL, undefined);
+        let s = await WeekSummaryModel.findOne(where);
+        check("week summary: 503 -> deferred (~10 s), attempt not used, old summary kept", s?.job?.state === "pending" && s.job.attempts === 0 && s.job.deferrals === 1 && s.summary === oldText && +s.job.runAt! - Date.now() < 15_000);
+        await WeekSummaryModel.updateOne(where, { "job.runAt": new Date(Date.now() - 1000), "job.deferrals": 10 });
+        env.GEMINI_FALLBACK_MODEL = undefined;
+        gemini.failModel(env.GEMINI_MODEL, 503);
+        await processWeekSummary((await claimNextWeekSummary(mine))!);
+        gemini.failModel(env.GEMINI_MODEL, undefined);
+        env.GEMINI_FALLBACK_MODEL = keepFallback;
+        s = await WeekSummaryModel.findOne(where);
+        check("week summary: deferral cap -> failed, stale again, old summary kept", s?.job?.state === "failed" && s.stale === true && s.summary === oldText);
+        const cooled = await weekSummaryView(userA, course._id, wk, true);
+        check("week summary: no new job during the cooldown after a failure", cooled?.generating === false && (await WeekSummaryModel.findOne(where))?.job?.state === "failed");
+        const forced = await weekSummaryView(userA, course._id, wk, true, { force: true });
+        check("week summary: refresh button queues anyway", forced?.generating === true);
+      }
 
       // --- audio: a failed piece is the only one redone ---
       {

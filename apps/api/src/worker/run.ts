@@ -7,6 +7,8 @@ import { markWeeksStale } from "../services/notes";
 import { claimNext, complete, defer, fail, LeaseLostError, sweepExhausted, type ClaimedNote } from "../services/queue";
 import { processSuggest } from "../services/suggest";
 import { claimNextSuggest, enqueueSuggest, sweepSuggest } from "../services/suggestQueue";
+import { processWeekSummary } from "../services/weekSummary";
+import { claimNextWeekSummary, sweepWeekSummaries } from "../services/weekSummaryQueue";
 
 // The job loops, without any process-level side effects, so the check scripts can run them in-process.
 // The real entry point (connect, signals) is worker/index.ts.
@@ -88,6 +90,7 @@ export function startWorker(opts: WorkerOptions): { stop: () => Promise<void> } 
           lastSweep = Date.now();
           await sweepExhausted();
           await sweepSuggest();
+          await sweepWeekSummaries();
         }
         if (index === 0 && Date.now() - lastRetention > RETENTION_EVERY_MS) {
           lastRetention = Date.now();
@@ -103,6 +106,12 @@ export function startWorker(opts: WorkerOptions): { stop: () => Promise<void> } 
         const toSuggest = await claimNextSuggest(opts.claimFilter);
         if (toSuggest) {
           await processSuggest(toSuggest);
+          continue;
+        }
+        // Week summaries last: they only run when nothing else is waiting.
+        const toSummarize = await claimNextWeekSummary(opts.claimFilter);
+        if (toSummarize) {
+          await processWeekSummary(toSummarize);
           continue;
         }
         await sleep(IDLE_MS);

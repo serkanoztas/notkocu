@@ -3,6 +3,7 @@ import { semesterWeekNo, type CourseDetailResponse, type WeekResponse } from "@n
 import { requireAuth } from "../middleware/requireAuth";
 import { CourseModel, NoteItemModel, SemesterModel, SessionModel, UserModel } from "../models";
 import { assertId, serializeNote, toObjectId } from "../services/notes";
+import { weekSummaryView } from "../services/weekSummary";
 import { AppError } from "../utils/AppError";
 import { asyncHandler } from "../utils/asyncHandler";
 
@@ -10,6 +11,10 @@ export const coursesRouter = Router();
 coursesRouter.use(requireAuth);
 
 const json = <T>(value: unknown) => JSON.parse(JSON.stringify(value)) as T;
+
+/** A week has something to summarize when at least one note is ready and has a summary or text. */
+const hasSummarizable = (notes: { status?: string | null; aiSummary?: string | null; extractedText?: string | null }[]) =>
+  notes.some((n) => n.status === "ready" && !!(n.aiSummary || n.extractedText));
 
 async function loadOwnCourse(userId: string, id: string | undefined) {
   const course = await CourseModel.findOne({ _id: assertId(id), userId }).lean();
@@ -70,8 +75,23 @@ coursesRouter.get(
       course: json(course),
       weekNo: no,
       notes: notes.map(serializeNote),
-      summary: null, // AI summary arrives in stage 5
+      summary: await weekSummaryView(userId, course._id, no, hasSummarizable(notes)),
     };
     res.json(out);
+  }),
+);
+
+// "Yenile": queue a fresh summary even when it is not stale (the cooldown after a failure does not apply).
+coursesRouter.post(
+  "/:id/weeks/:no/summary",
+  asyncHandler(async (req, res) => {
+    const userId = req.userId;
+    const { course, semester } = await loadOwnCourse(userId, req.params.id);
+    const no = Number(req.params.no);
+    if (!Number.isInteger(no) || no < 1 || no > semester.weekCount) {
+      throw new AppError(400, "Geçersiz hafta", "INVALID_WEEK");
+    }
+    const notes = await NoteItemModel.find({ userId, courseId: course._id, weekNo: no, status: "ready" }).select("status aiSummary extractedText").lean();
+    res.status(202).json({ summary: await weekSummaryView(userId, course._id, no, hasSummarizable(notes), { force: true }) });
   }),
 );

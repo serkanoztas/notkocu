@@ -11,7 +11,7 @@ import sharp from "sharp";
 import { createApp } from "../src/app";
 import { env } from "../src/config/env";
 import { dayIndex, minutesOfDay, semesterWeekNo } from "@notkocu/shared";
-import { CourseModel, NoteItemModel, SemesterModel, SessionModel } from "../src/models";
+import { CourseModel, NoteItemModel, SemesterModel, SessionModel, WeekSummaryModel } from "../src/models";
 import { ocrPdfPages } from "../src/services/ai/documentOcr";
 import { deleteUserFiles, getUsage } from "../src/services/files";
 import { signAccessToken } from "../src/services/auth/tokens";
@@ -38,6 +38,7 @@ async function cleanup() {
   await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SessionModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await WeekSummaryModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
 }
@@ -342,6 +343,41 @@ async function main() {
     res = await fetch(`${base}/api/notes/${vtNote._id}`, { method: "PATCH", headers: { ...auth(tokenA), "Content-Type": "application/json" }, body: JSON.stringify({ courseId: null }) });
     after = ((await res.json()) as { note: typeof after }).note;
     check("undo (back to the inbox) keeps the suggestion", after.courseId === null && !!after.suggestion);
+
+    // --- weekly summary: opening the week page is the trigger ---
+    {
+      type WeekBody = { summary: { summary: string; noteIds: string[]; generating: boolean; stale: boolean } | null };
+      const getWeek = async (token: string, no: number) => {
+        const r = await fetch(base + "/api/courses/" + vtCourse._id + "/weeks/" + no, { headers: auth(token) });
+        return { status: r.status, body: (await r.json()) as WeekBody };
+      };
+      const wk = 3;
+      const empty = await getWeek(tokenA, 9);
+      check("week page with no ready notes -> summary null, no job", empty.status === 200 && empty.body.summary === null && (await WeekSummaryModel.countDocuments({ userId: userA, weekNo: 9 })) === 0);
+      await NoteItemModel.create({ userId: userA, courseId: vtCourse._id, weekNo: wk, type: "text", title: "1NF", status: "ready", extractedText: "Birinci normal form her hücrede tek değer ister.", content: { markdown: "x" } });
+      const first = await getWeek(tokenA, wk);
+      await getWeek(tokenA, wk);
+      check("opening the week queues one summary job", first.body.summary?.generating === true && (await WeekSummaryModel.countDocuments({ userId: userA, weekNo: wk })) === 1);
+      const waitSummary = async (minNotes: number) => {
+        for (let i = 0; i < 30; i++) {
+          const w = await getWeek(tokenA, wk);
+          if (w.body.summary && !w.body.summary.generating && w.body.summary.summary && w.body.summary.noteIds.length >= minNotes && !w.body.summary.stale) return w.body.summary;
+          await sleep(1500);
+        }
+        return null;
+      };
+      const ready = await waitSummary(1);
+      if (!REAL_GEMINI) check("worker wrote the summary (1 note)", !!ready && ready.noteIds.length === 1 && /Sahte özet/.test(ready.summary));
+      res = await jsonPost(tokenA, { type: "text", markdown: "Quiz çarşamba günü, normalizasyon konusundan.", courseId: String(vtCourse._id), weekNo: wk });
+      const refreshed = await getWeek(tokenA, wk);
+      check("a new note makes the summary stale -> regenerating", res.status === 201 && (refreshed.body.summary?.generating === true || refreshed.body.summary?.noteIds.length === 2)); // the worker may already be done
+      const second = await waitSummary(2);
+      if (!REAL_GEMINI) check("summary rebuilt from both notes", !!second && second.noteIds.length === 2);
+      res = await fetch(base + "/api/courses/" + vtCourse._id + "/weeks/" + wk + "/summary", { method: "POST", headers: auth(tokenA) });
+      check("POST summary (refresh) -> 202 generating", res.status === 202 && ((await res.json()) as WeekBody).summary?.generating === true);
+      await waitSummary(2);
+      check("other user cannot read the week -> 404", (await getWeek(tokenB, wk)).status === 404);
+    }
 
     if (gemini) {
       gemini.setSuggestConfidence(0.4);
