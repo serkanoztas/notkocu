@@ -125,6 +125,8 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Depolama sınırı:** kullanıcı başına `USER_STORAGE_LIMIT_MB` (varsayılan 200). Aşılırsa yükleme 413 `STORAGE_LIMIT` ile reddedilir. Sınır yumuşaktır: aynı anda gelen iki yükleme hafifçe aşabilir. `GET /api/me/storage` kullanılan ve toplam bayt sayısını döner; Ayarlar'da "23 MB / 200 MB" gösterilir.
 - **Kuyruk (MongoDB):** bekleyen not (`status: pending`) iştir; `NoteItem.job` alt dokümanı `attempts`, `deferrals`, `runAt`, `leaseUntil`, `lastError` tutar ve istemciye gönderilmez. Worker `findOneAndUpdate` ile `pending` ve vakti gelmiş notu (ya da lease'i dolmuş `processing` notu) alıp `processing` yapar, 3 dk lease verir ve `attempts`'i artırır. Başarıda `ready`; hatada 30 sn × deneme kadar bekleyip `pending`'e döner; 3. denemeden sonra `failed`. Sonuç yalnızca lease hâlâ worker'daysa yazılır (çift işleme koruması). Lease'i dolmuş ve 3 denemesi bitmiş kayıtlar worker'ın süpürme adımıyla `failed` olur. `POST /api/notes/:id/retry` yalnızca `failed` notu `pending`'e alır (aksi 409).
 - **Gemini 429/kota** deneme sayısını artırmaz: not `pending`'e ~60 sn sonrasına ertelenir (`deferrals` artar). Kota günlerce sürerse sonsuz döngü olmasın diye 30 ertelemeden sonra `failed` olur. **Gemini 503/500 (model aşırı yüklü):** önce aynı istek hemen bir kez `GEMINI_FALLBACK_MODEL` ile denenir (tanımlıysa; worker log'unda yalnızca model adları ve durum kodu görünür). Yedek de başarısızsa 429 gibi ertelenir, deneme sayısı artmaz: ilk erteleme 10 sn, sonra 20, 40, 80, 160 sn, en çok 5 dk; 10 ertelemeden (~30 dk) sonra `failed` (`AI_UNAVAILABLE`; öneri hattında sessizce `done`). Diğer hatalar 3 deneme kuralındadır.
+
+- **Test notu:** `check-queue` / `check-http` çalıştırılırken worker açık olmamalı; açık worker betiklerin test notlarını kapıp sonuçları rastgele bozar.
 - **OCR:** `services/ai/imageOcr.ts`, program okuyucuyla aynı model/thinking ayarlarını ve `responseSchema`'yı kullanır (`markdown`, `title`, `summary`); yeniden deneme yalnızca kuyruktadır. Log'a yalnızca HTTP durumu yazılır. Sonuç `content.ocrMarkdown`, `extractedText` (metin yoksa özet) ve `aiSummary`'ye gider; başlık varsayılan "Fotoğraf" ise Gemini'nin önerdiği başlıkla değişir.
 - **Silme:** not silinince `fileKey` ve `thumbKey` dosyaları da silinir; `DELETE /api/me` kullanıcının tüm GridFS dosyalarını `metadata.userId` ile siler. Görsel notlarda metin düzenleme (`markdown` PATCH) 400 döner.
 - **Worker:** `npm run worker` (ayrı süreç, eşzamanlılık 2, SIGINT/SIGTERM'de düzgün kapanır). Kuyruk ve dosya mantığı `npm run check-queue`, uçtan uca HTTP akışı (worker açıkken) `npm run check-http` ile denenir.
@@ -281,9 +283,9 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 1. [x] **Temel:** Expo + Express + MongoDB, Google ile giriş + JWT, dönem/ders/oturum şeması
 2. [x] **Program içe aktarma:** görselden JSON (Gemini), onay ekranı, haftaların hesaplanması
 3. [x] **Ana ekranlar:** Bugün, Ders, Hafta ekranları; hızlı yakalama (metin); otomatik atama kuralı
-4. [ ] **Dosyalar ve işleme:**
+4. [x] **Dosyalar ve işleme:**
    - [x] **4a:** görsel notlar (kamera/galeri), GridFS, Mongo kuyruğu + worker, Gemini OCR, depolama sınırı (Android cihazda test edildi)
-   - [ ] **4b:** belge (PDF/PPTX/DOCX) + link notu, gelen kutusu AI ders önerisi, çevrimdışı not kuyruğu (outbox), Paylaş → NotKoçu (kod tamam; tek dev build ile Android cihaz testi bekliyor)
+   - [x] **4b:** belge (PDF/PPTX/DOCX) + link notu, gelen kutusu AI ders önerisi, çevrimdışı not kuyruğu (outbox), Paylaş → NotKoçu (Android cihazda test edildi)
 5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test; **preview build'de uçak modunda çevrimdışı açılış doğrulaması** (dev build'de uçak modu Metro'ya erişimi kestiği için test edilemez; 4a'da yalnızca API kapalıyken açılış doğrulandı)
 
