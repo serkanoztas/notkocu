@@ -113,6 +113,40 @@ async function main() {
     res = await fetch(`${base}/api/files/not-an-id`, { headers: auth(tokenA) });
     check("malformed id -> 404", res.status === 404);
 
+    // --- audio upload (pieces of one recording) ---
+    const adts = (n: number) => Buffer.concat([Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]), Buffer.alloc(n, 7)]);
+    function audioForm(pieces: Buffer[], fields: Record<string, string>) {
+      const f = new FormData();
+      for (const [k, v] of Object.entries(fields)) f.append(k, v);
+      for (const [i, b] of pieces.entries()) f.append("file", new Blob([b], { type: "audio/aac" }), "chunk-" + i + ".aac");
+      return f;
+    }
+    type AudioNote = { _id: string; type: string; content: { chunks: { fileKey: string; startSec: number; durationSec: number }[]; durationSec: number; pinned: boolean; audioExpiresAt: string } };
+    const audioFields = { type: "audio", inbox: "1", clientId: "audio-check-0001", chunkDurations: "[600, 300]" };
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(5000), adts(3000)], audioFields) });
+    const audio = (await res.json()) as { note: AudioNote };
+    const ac = audio.note.content;
+    check("audio upload -> 201", res.status === 201 && audio.note.type === "audio");
+    check("audio pieces timed on one global timeline", ac.chunks.length === 2 && ac.chunks[0]!.startSec === 0 && ac.chunks[1]!.startSec === 600 && ac.durationSec === 900);
+    const days = (+new Date(ac.audioExpiresAt) - Date.now()) / 86_400_000;
+    check("audio expires in ~30 days, not pinned", days > 29.9 && days < 30.1 && ac.pinned === false);
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(5000), adts(3000)], audioFields) });
+    check("same clientId -> 200, same note", res.status === 200 && ((await res.json()) as { note: AudioNote }).note._id === audio.note._id);
+    res = await fetch(base + "/api/files/" + ac.chunks[1]!.fileKey, { headers: auth(tokenA) });
+    check("owner streams a piece", res.status === 200 && res.headers.get("content-type") === "audio/aac" && (await res.arrayBuffer()).byteLength === 3007);
+    res = await fetch(base + "/api/files/" + ac.chunks[1]!.fileKey, { headers: auth(tokenB) });
+    check("other user cannot stream a piece", res.status === 404);
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([Buffer.from("not audio at all, just some text bytes")], { type: "audio", inbox: "1" }) });
+    check("fake audio (magic bytes) rejected 400", res.status === 400);
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(500), adts(500)], { type: "audio", inbox: "1", chunkDurations: "[600]" }) });
+    check("durations that do not match the pieces rejected 400", res.status === 400);
+    res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(9 * 1024 * 1024)], { type: "audio", inbox: "1" }) });
+    check("piece over 8 MB rejected 413", res.status === 413);
+    res = await fetch(base + "/api/notes/" + audio.note._id, { method: "DELETE", headers: auth(tokenA) });
+    const gone = await fetch(base + "/api/files/" + ac.chunks[0]!.fileKey, { headers: auth(tokenA) });
+    const gone2 = await fetch(base + "/api/files/" + ac.chunks[1]!.fileKey, { headers: auth(tokenA) });
+    check("deleting the note deletes every piece", res.status === 204 && gone.status === 404 && gone2.status === 404);
+
     res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(Buffer.from("%PDF-1.4 fake pdf content here"), { type: "image", inbox: "1" }, "application/pdf") });
     check("pdf mime rejected 400", res.status === 400);
     res = await fetch(`${base}/api/notes`, { method: "POST", headers: auth(tokenA), body: form(Buffer.from("this is plain text pretending to be a jpeg"), { type: "image", inbox: "1" }) });

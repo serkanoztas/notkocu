@@ -16,12 +16,13 @@ export function getGemini(): GoogleGenAI {
   return client;
 }
 
-export type GeminiTask = "default" | "ocr" | "schedule";
+export type GeminiTask = "default" | "ocr" | "schedule" | "audio";
 
 /** Per-task model; empty task-specific env falls back to GEMINI_MODEL. */
 export function geminiModel(task: GeminiTask = "default"): string {
   if (task === "ocr") return env.GEMINI_MODEL_OCR || env.GEMINI_MODEL;
   if (task === "schedule") return env.GEMINI_MODEL_SCHEDULE || env.GEMINI_MODEL;
+  if (task === "audio") return env.GEMINI_MODEL_AUDIO || env.GEMINI_MODEL;
   return env.GEMINI_MODEL;
 }
 

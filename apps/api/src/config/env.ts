@@ -14,6 +14,7 @@ const schema = z.object({
   // Optional per-task overrides; empty falls back to GEMINI_MODEL.
   GEMINI_MODEL_OCR: z.string().optional(),
   GEMINI_MODEL_SCHEDULE: z.string().optional(),
+  GEMINI_MODEL_AUDIO: z.string().optional(),
   // Tried once, immediately, when a call gets 500/503; empty = no fallback.
   GEMINI_FALLBACK_MODEL: z.string().optional(),
   // MINIMAL is skipped automatically for models that do not support it.

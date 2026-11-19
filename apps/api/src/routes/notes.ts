@@ -2,10 +2,19 @@ import { Router, type RequestHandler } from "express";
 import rateLimit from "express-rate-limit";
 import multer from "multer";
 import { z } from "zod";
-import type { NoteResponse } from "@notkocu/shared";
+import {
+  AUDIO_MAX_CHUNKS,
+  AUDIO_MAX_CHUNK_BYTES,
+  AUDIO_MAX_TOTAL_BYTES,
+  AUDIO_RETENTION_DAYS,
+  chunkStarts,
+  type AudioChunk,
+  type NoteResponse,
+} from "@notkocu/shared";
 import { requireAuth } from "../middleware/requireAuth";
 import { NoteItemModel } from "../models";
 import { assertWithinLimit, deleteFiles, saveFile } from "../services/files";
+import { estimateDurationSec, sniffAudio } from "../services/audioSniff";
 import { sniffDocument } from "../services/documents/sniff";
 import { DOCUMENT_MIME } from "../services/documents/types";
 import { processImage, sniffImageMime } from "../services/imageProcess";
@@ -37,13 +46,17 @@ const DEFAULT_IMAGE_TITLE = "Fotoğraf";
 // The declared mime is not trusted anywhere: the real type is read from the bytes (sniff*).
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: AUDIO_MAX_CHUNKS },
 });
 
-/** Multipart bodies carry a photo; JSON bodies (text notes) pass through untouched. */
+/** Multipart bodies carry a photo, a document or the pieces of a recording; JSON bodies pass through untouched. */
 const receiveUpload: RequestHandler = (req, res, next) => {
   if (!req.is("multipart/form-data")) return next();
-  upload.single("file")(req, res, (err: unknown) => {
+  // Everything is held in memory: refuse an oversized body before reading it (a recording is the largest).
+  if (Number(req.headers["content-length"] ?? 0) > AUDIO_MAX_TOTAL_BYTES + 1024 * 1024) {
+    return next(new AppError(413, "Yükleme çok büyük", "FILE_TOO_LARGE"));
+  }
+  upload.array("file", AUDIO_MAX_CHUNKS)(req, res, (err: unknown) => {
     if (err instanceof multer.MulterError) {
       return next(
         err.code === "LIMIT_FILE_SIZE"
@@ -76,8 +89,10 @@ const metaFields = {
 // Multipart has no null, so "inbox" is its own flag; fields arrive as strings.
 const uploadForm = z.object({
   ...metaFields,
-  type: z.enum(["image", "document"]),
+  type: z.enum(["image", "document", "audio"]),
   title: title.optional(),
+  // Audio only: seconds of each piece, in order, as a JSON array (the app measures them while recording).
+  chunkDurations: z.string().max(2000).optional(),
   courseId: objectIdLike.optional(),
   weekNo: z.coerce.number().int().min(1).max(60).optional(),
   inbox: z.enum(["1", "true"]).optional(),
@@ -182,9 +197,10 @@ function cleanFileName(raw: string): string {
 const existingNote = (userId: string, clientId?: string) =>
   clientId ? NoteItemModel.findOne({ userId, clientId }) : Promise.resolve(null);
 
-async function createUploadNote(userId: string, raw: unknown, file: Express.Multer.File | undefined) {
-  if (!file) throw new AppError(400, "Dosya gerekli", "FILE_REQUIRED");
+async function createUploadNote(userId: string, raw: unknown, files: Express.Multer.File[]) {
+  if (files.length === 0) throw new AppError(400, "Dosya gerekli", "FILE_REQUIRED");
   const form = uploadForm.parse(raw);
+  if (form.type !== "audio" && files.length !== 1) throw new AppError(400, "Tek dosya gerekli", "INVALID_UPLOAD");
   const known = await existingNote(userId, form.clientId); // before any processing or storage
   if (known) return { note: known, created: false };
 
@@ -192,9 +208,11 @@ async function createUploadNote(userId: string, raw: unknown, file: Express.Mult
   const target = await resolveTarget(userId, { courseId: form.inbox ? null : form.courseId, weekNo: form.weekNo }, when);
   try {
     const note =
-      form.type === "image"
-        ? await createImageNote(userId, form, target, file, stamp)
-        : await createDocumentNote(userId, form, target, file, stamp);
+      form.type === "audio"
+        ? await createAudioNote(userId, form, target, files, stamp)
+        : form.type === "image"
+          ? await createImageNote(userId, form, target, files[0]!, stamp)
+          : await createDocumentNote(userId, form, target, files[0]!, stamp);
     return { note, created: true };
   } catch (err) {
     // Two requests with the same clientId raced: the files of ours are already removed, return the winner.
@@ -272,6 +290,69 @@ async function createDocumentNote(
   }
 }
 
+/** Pieces of one recording: separate GridFS files, timed on one global timeline, transcribed by the worker. */
+async function createAudioNote(
+  userId: string,
+  form: z.infer<typeof uploadForm>,
+  target: Target,
+  files: Express.Multer.File[],
+  stamp: ReturnType<typeof metaOf>["stamp"],
+) {
+  const total = files.reduce((n, f) => n + f.buffer.length, 0);
+  if (total > AUDIO_MAX_TOTAL_BYTES) throw new AppError(413, "Kayıt en fazla 60 MB olabilir", "AUDIO_TOO_LARGE");
+
+  const kinds = files.map((f) => {
+    if (f.buffer.length > AUDIO_MAX_CHUNK_BYTES) throw new AppError(413, "Ses parçası çok büyük", "AUDIO_TOO_LARGE");
+    const kind = sniffAudio(f.buffer);
+    if (!kind) throw new AppError(400, "Desteklenmeyen ses biçimi", "UNSUPPORTED_AUDIO_TYPE");
+    return kind;
+  });
+
+  let claimed: unknown;
+  try {
+    claimed = form.chunkDurations ? JSON.parse(form.chunkDurations) : [];
+  } catch {
+    throw new AppError(400, "Geçersiz süre listesi", "VALIDATION_ERROR");
+  }
+  const given = z.array(z.number().min(0).max(3600)).safeParse(claimed);
+  if (!given.success || (given.data.length !== 0 && given.data.length !== files.length)) {
+    throw new AppError(400, "Parça süreleri parça sayısıyla eşleşmiyor", "VALIDATION_ERROR");
+  }
+  // A piece the app could not time (0 or missing) is estimated from its size.
+  const durations = files.map((f, i) => given.data[i] || estimateDurationSec(f.buffer.length));
+  const starts = chunkStarts(durations);
+
+  await assertWithinLimit(userId, total);
+  const saved: string[] = [];
+  try {
+    const chunks: AudioChunk[] = [];
+    for (const [i, f] of files.entries()) {
+      const kind = kinds[i]!;
+      const fileKey = await saveFile(userId, f.buffer, { mime: kind.mime, filename: "audio-" + i + "." + kind.ext });
+      saved.push(fileKey);
+      chunks.push({ fileKey, startSec: starts[i]!, durationSec: durations[i]!, size: f.buffer.length, mime: kind.mime });
+    }
+    const durationSec = durations.reduce((a, b) => a + b, 0);
+    return await NoteItemModel.create({
+      userId,
+      ...placement(target),
+      type: "audio",
+      title: form.title || "Ders kaydı",
+      content: {
+        chunks,
+        durationSec,
+        audioExpiresAt: new Date(Date.now() + AUDIO_RETENTION_DAYS * 24 * 3600 * 1000),
+        pinned: false,
+      },
+      status: "pending", // the worker transcribes it
+      ...stamp,
+    });
+  } catch (err) {
+    await deleteFiles(userId, saved); // no note, no orphan files
+    throw err;
+  }
+}
+
 notesRouter.post(
   "/",
   uploadLimiter,
@@ -280,7 +361,7 @@ notesRouter.post(
     const userId = req.userId;
 
     if (req.is("multipart/form-data")) {
-      const { note, created } = await createUploadNote(userId, req.body, req.file);
+      const { note, created } = await createUploadNote(userId, req.body, (req.files as Express.Multer.File[] | undefined) ?? []);
       if (created) await markWeeksStale(userId, [note]);
       const out: NoteResponse = { note: serializeNote(note.toJSON()) };
       res.status(created ? 201 : 200).json(out);
@@ -389,9 +470,10 @@ notesRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const note = await findOwnNote(req.userId, req.params.id);
-    const content = note.content as { fileKey?: string; thumbKey?: string } | undefined;
+    const content = note.content as { fileKey?: string; thumbKey?: string; chunks?: { fileKey?: string }[] } | undefined;
     await note.deleteOne();
-    await deleteFiles(req.userId, [content?.fileKey, content?.thumbKey]);
+    // Image/document: one file (+ thumbnail); audio: every piece.
+    await deleteFiles(req.userId, [content?.fileKey, content?.thumbKey, ...(content?.chunks ?? []).map((c) => c.fileKey)]);
     await markWeeksStale(req.userId, [note]);
     res.status(204).end();
   }),
