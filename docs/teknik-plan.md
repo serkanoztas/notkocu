@@ -154,6 +154,17 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Saklama:** Ses dosyaları oluşturma + 30 gün sonra otomatik silinir (**tüm parçalar**); transkript, bölümler ve özet kalıcıdır. "Kalıcı yap" (`pinned`) süresiz tutar ve kotaya sayılır; geri alınabilir: kalıcılık kalkınca `audioExpiresAt = max(şimdi + 7 gün, eski süre)`. Worker günde bir süpürür. Yükleme sınırı kayıt başına 60 MB (en çok 24 parça, parça başı 8 MB).
 - **Haftalık özet:** Yalnızca hafta sayfası açıldığında ve özet yoksa/eskimişse arka planda üretilir; açılmayan haftalar için Gemini çağrısı yapılmaz.
 
+**Aşama 5'te uygulanan sapmalar (ses, haftalık özet, ekranlar):**
+
+- **Yükleme:** `POST /api/notes` multipart, `type=audio`, birden fazla `file` parçası (sırayla) + `chunkDurations` (JSON, saniye; cihazın ölçtüğü). En çok 24 parça, parça başı 8 MB, toplam 60 MB (`Content-Length` > 61 MB gövde okunmadan 413). Tür ilk baytlardan: ADTS AAC ya da MP4/M4A, aksi 400 `UNSUPPORTED_AUDIO_TYPE`. Parçalar ayrı GridFS dosyası; `content.chunks[]` küresel zaman çizelgesinde (`startSec` = önceki parçaların süreleri toplamı). `audioExpiresAt` = sunucuya ulaşma + 30 gün. Süresi eksik/0 olan parça boyuttan kestirilir (24 kbps).
+- **Worker (ses):** parça başına Gemini ses girdisi (satır içi; parçalar küçük olduğundan Files API gerekmedi), şema `segments[{start:"MM:SS", text}]`; zamanlar parça uzunluğuna sıkıştırılıp `chunk.startSec` ile küresele çevrilir. Biten parça sonucu `job.progress`'e yazılır ve **kira süresi uzatılır**; yeniden denemede yalnızca başarısız parça tekrarlanır. Sonra transkript metninden (ses yeniden gönderilmez) `chapters[]` + `aiSummary`. `extractedText` zaman damgasız transkripttir. `GEMINI_MODEL_AUDIO` (boşsa `GEMINI_MODEL`); yedek model, 429/503 erteleme ve log gizliliği mevcut kurallarla.
+- **Saklama:** worker başlangıçta ve 24 saatte bir süpürür (idempotent): süresi dolmuş, `pinned` olmayan, `ready/failed` ses notlarının **tüm parça dosyaları** silinir, `content.audioDeleted=true`, parçaların `fileKey`'i kalkar, süre/transkript/bölüm/özet kalır. `PATCH /api/notes/:id { pinned }` atomik alan güncellemesidir; `pinned:false` → `audioExpiresAt = max(şimdi + 7 gün, eski süre)`. `GET /api/me/storage` `pinnedAudioBytes` da döner (Ayarlar'da "Kalıcı sesler: X MB").
+- **Haftalık özet hattı:** `WeekSummary.job` üzerinde üçüncü kuyruk hattı (aynı kurallar). `GET /courses/:id/weeks/:no` hazır not varken özet yoksa/eskiyse işi **koşullu upsert** ile bir kez kuyruğa atar (tekrar açmak yığmaz; başarısızlıktan sonra 10 dk bekleme), yanıtta `summary { summary, noteIds, generatedAt, stale, generating }`. `POST …/summary` bekleme olmadan yeniler (202). Girdi: notların `aiSummary`'si (yoksa `extractedText` başı ~1500 karakter; ses için her zaman `aiSummary`), ~40k karakter sınırı; **kaynak `noteIds`'i sunucu belirler**, model yalnızca `{summary}` döner. Talep alındığında `stale=false`; iş sırasında değişen not `stale`'i tekrar `true` yapar.
+- **Mobil kayıt:** `expo-audio` (tek yeni native paket; plugin `enableBackgroundRecording` + `enableBackgroundPlayback`). Android'de ham ADTS AAC (`.aac`, mono 16 kHz 24 kbps) 10 dk'lık parçalar; her parça kapanınca `outbox/<clientId>/` içine taşınır, `entry.json` (`recording:true`) güncellenir. Açılışta aktif kaydı olmayan `recording` girdileri kurtarılır (kesilen son parça da dahil; süresi boyuttan kestirilir) ve normal gönderime girer. Kesintide (arama/sistem) kaydedici kendiliğinden durursa parça kapatılır, birkaç kez otomatik yeni parça denenir, olmazsa "Devam" gösterilir. **Hedef (ders/hafta) kaydın başında** çözülür ve `capturedAt` başlangıçtır. Kayıt, capture ekranı kapansa da sürer ("Kayıt sürüyor" şeridi). "Hocadan kayıt izni aldım" onayı olmadan başlamaz. Yükleme zaman aşımı 10 dk; 60 MB üstü istemcide "çok büyük".
+- **Mobil oynatma:** parçalar yetkili indirmeyle önbelleğe iner, **yerel `AudioPlaylist`** ile çalınır (planda iki oynatıcıyla elle önyükleme düşünülmüştü; yerel liste sonraki parçayı kendisi önyüklediği için daha az kod ve daha küçük boşluk). Konum her yerde küresel zaman: bölüm/satır/çubuk dokunuşu `locateChunk` ile parçayı bulur (sınıra denk zaman sonraki parçanın 0'ı), gerekirse `skipTo` + `seekTo`. Hız 1/1,5/2×, ±15 sn. Dalga formu yerine ilerleme çubuğu (dalga formu ses analizi ister).
+- **Hafta sayfası:** özet kartı ("N nottan", "Özet hazırlanıyor…", hazırlanırken 4 sn'de bir yenileme), "Tipe göre" (Ses, Görsel ızgarası, Belge·Metin·…) ve "Zaman çizelgesi" (gün başlıkları). Paylaş butonu Aşama 6'da. Ders sayfasındaki hafta kartı özeti göstermez (özet yalnızca hafta sayfası açılınca üretilir).
+- **Doğrulama:** `check-queue` (ses parçası bazlı yeniden deneme, saklama süpürmesi, haftalık özet hattı), `check-http` (ses yükleme/sniff/limit, uçtan uca transkript, pin/geri alma, hafta sayfası tetikleyicisi), `packages/shared` testleri (`locateChunk`). Hepsi sahte Gemini ile; çalıştırırken worker kapalı olmalı. ADTS çıktısı, arka plan kaydı, kesinti/kurtarma ve parça geçişi yalnızca cihazda doğrulanabilir.
+
 **Haftalık özet:** Haftanın tüm `extractedText` alanları tek bir prompt'ta birleştirilir. Gemini, 3–5 cümlelik özet ve hangi notlardan beslendiğini döner. Uzun ses transkriptlerinde ham metin yerine notun kendi `aiSummary` alanı kullanılır; böylece prompt kısa kalır.
 
 ## Ders programı içe aktarma
@@ -252,14 +263,14 @@ API REST olarak tasarlandı. Tek istemcisi mobil uygulamadır. `/api/health` ve 
 | GET | `/api/courses` | Aktif dönemin dersleri ve oturumları |
 | GET | `/api/courses/:id` | Ders detayı ve hafta başına not sayıları |
 | PATCH | `/api/courses/:id` | Ders adı, rengi, oturumları düzenlenir |
-| GET | `/api/courses/:id/weeks/:no` | Haftanın notları ve özeti |
+| GET | `/api/courses/:id/weeks/:no` | Haftanın notları ve özeti (özet eskiyse işi kuyruğa atar) |
 | POST | `/api/courses/:id/weeks/:no/summary` | Haftalık özeti yeniden üretir |
 | GET | `/api/files/:id` | Kullanıcının kendi dosyasını (görsel ya da küçük resim) akıtır; başkasınınki 404 |
 | POST | `/api/notes` | Not oluşturur; otomatik atamayı yapar. Metin/link: JSON; görsel/belge: multipart (`file`), `pending` olarak kuyruğa girer. `clientId` ve `capturedAt` ile idempotent (tekrarda var olan not 200 döner) |
 | POST | `/api/notes/:id/retry` | `failed` notu yeniden kuyruğa alır |
-| GET | `/api/me/storage` | Kullanılan ve izin verilen depolama alanı (bayt) |
+| GET | `/api/me/storage` | Kullanılan, izin verilen ve kalıcı yapılmış ses depolama alanı (bayt) |
 | GET | `/api/notes/:id` | Not detayı ve işleme durumu |
-| PATCH | `/api/notes/:id` | Düzenleme veya ders/hafta ataması |
+| PATCH | `/api/notes/:id` | Düzenleme, ders/hafta ataması, ses için `pinned` (Kalıcı yap / geri al) |
 | DELETE | `/api/notes/:id` | Notu ve dosyalarını (görsel + küçük resim) siler |
 | GET | `/api/inbox` | Atanmamış notlar ve AI önerileri |
 | POST | `/api/inbox/approve` | `{ noteIds }`: önerisi olan gelen kutusu notlarını önerilen ders ve haftaya atar (`{ approved, skipped }`) |
@@ -293,7 +304,7 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
 4. [x] **Dosyalar ve işleme:**
    - [x] **4a:** görsel notlar (kamera/galeri), GridFS, Mongo kuyruğu + worker, Gemini OCR, depolama sınırı (Android cihazda test edildi)
    - [x] **4b:** belge (PDF/PPTX/DOCX) + link notu, gelen kutusu AI ders önerisi, çevrimdışı not kuyruğu (outbox), Paylaş → NotKoçu (Android cihazda test edildi)
-5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları
+5. [ ] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları (kod ve API testleri tamam; dev build ile Android cihaz testi bekliyor)
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test; **preview build'de uçak modunda çevrimdışı açılış doğrulaması** (dev build'de uçak modu Metro'ya erişimi kestiği için test edilemez; 4a'da yalnızca API kapalıyken açılış doğrulandı)
 
 **Kurulum notları (Google girişi):**
