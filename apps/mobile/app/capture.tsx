@@ -4,21 +4,23 @@ import * as ImagePicker from "expo-image-picker";
 import { useShareIntentContext } from "expo-share-intent";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TargetPicker, type PickedTarget } from "../src/components/TargetPicker";
 import type { NewOutboxNote } from "../src/lib/OutboxProvider";
 import { useNow, useTimeZone } from "../src/hooks/useNow";
 import { findAutoTarget, useScheduleNow } from "../src/hooks/useSchedule";
+import { formatDuration } from "../src/lib/format";
 import { useOutbox } from "../src/lib/OutboxProvider";
+import { useRecording } from "../src/lib/RecordingProvider";
 
 type IconName = keyof typeof Ionicons.glyphMap;
-type CaptureType = "text" | "image" | "document" | "link";
+type CaptureType = "text" | "image" | "audio" | "document" | "link";
 
 const TYPES: { key: string; label: string; icon: IconName; active: boolean }[] = [
   { key: "text", label: "Metin", icon: "reorder-three-outline", active: true },
   { key: "image", label: "Fotoğraf", icon: "camera-outline", active: true },
-  { key: "audio", label: "Ses kaydı", icon: "mic-outline", active: false },
+  { key: "audio", label: "Ses kaydı", icon: "mic-outline", active: true },
   { key: "document", label: "Dosya", icon: "document-outline", active: true },
   { key: "link", label: "Link", icon: "link-outline", active: true },
   { key: "task", label: "Görev", icon: "checkbox-outline", active: false },
@@ -67,6 +69,7 @@ export default function CaptureScreen() {
   const now = useNow(); // the shown target refreshes once a minute while this sheet is open
   const schedule = useScheduleNow(now);
   const outbox = useOutbox();
+  const rec = useRecording();
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
   const [fromShare, setFromShare] = useState(false);
 
@@ -83,6 +86,8 @@ export default function CaptureScreen() {
   const [linkTitle, setLinkTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [consent, setConsent] = useState(false); // "Hocadan kayıt izni aldım"
+  const recording = rec.status !== "idle"; // a recording is in progress: this sheet is its control panel
 
   const manualCourse = manual?.courseId ? schedule.courses.find((c) => c._id === manual.courseId) : undefined;
   const target = manual
@@ -107,6 +112,44 @@ export default function CaptureScreen() {
     }
     const auto = findAutoTarget(schedule.semester, schedule.courses, new Date(), timeZone);
     return auto ? { courseId: auto.course._id, weekNo: auto.weekNo } : { courseId: null };
+  }
+
+  // Opened again from the "Kayıt sürüyor" strip: show the recorder.
+  useEffect(() => {
+    if (rec.status !== "idle") setType("audio");
+  }, [rec.status]);
+
+  async function startRecording() {
+    if (!consent) return;
+    setError(null);
+    const started = await rec.start({ target: resolveTarget() }); // the start of the recording decides where it goes
+    if (!started) setError(null); // the reason is in rec.error
+  }
+
+  async function finishRecording() {
+    const ok = await rec.finish();
+    if (ok) router.back();
+  }
+
+  // Closing the sheet never stops a recording by accident.
+  function closeSheet() {
+    if (rec.status === "idle" || rec.status === "starting" || rec.status === "finishing") {
+      router.back();
+      return;
+    }
+    Alert.alert("Kayıt sürüyor", "Kaydı ne yapalım?", [
+      { text: "Kayıt sürsün", onPress: () => router.back() },
+      { text: "Bitir ve kaydet", onPress: () => void finishRecording() },
+      {
+        text: "Kaydı sil",
+        style: "destructive",
+        onPress: () =>
+          Alert.alert("Kaydı sil", "Şimdiye kadarki kayıt silinecek.", [
+            { text: "Vazgeç", style: "cancel" },
+            { text: "Sil", style: "destructive", onPress: () => void rec.discard().then(() => router.back()) },
+          ]),
+      },
+    ]);
   }
 
   // Content shared from another app (WhatsApp, Drive, a browser ...): fill the screen, the user presses Kaydet.
@@ -229,9 +272,10 @@ export default function CaptureScreen() {
     }
   }
 
-  const busy = saving;
+  const busy = saving || rec.status === "starting" || rec.status === "finishing";
   const canSave =
     !busy &&
+    type !== "audio" && // a recording has its own controls
     (type === "image"
       ? photos.length > 0
       : type === "document"
@@ -249,7 +293,7 @@ export default function CaptureScreen() {
         <View className="flex-row items-center justify-between">
           <Text className="font-heading text-3xl text-ink">Hızlı not</Text>
           <Pressable
-            onPress={() => router.back()}
+            onPress={closeSheet}
             accessibilityRole="button"
             accessibilityLabel="Kapat"
             className="h-11 w-11 items-center justify-center rounded-xl bg-line/60"
@@ -273,7 +317,7 @@ export default function CaptureScreen() {
           <View className="items-end gap-1">
             <Pressable
               onPress={() => setPicking(true)}
-              disabled={!schedule.semester}
+              disabled={!schedule.semester || recording}
               className="min-h-touch items-center justify-center rounded-xl border border-line bg-card px-4"
             >
               <Text className="font-body-semibold text-base text-ink">Değiştir</Text>
@@ -290,7 +334,7 @@ export default function CaptureScreen() {
           {TYPES.map((t) => (
             <Pressable
               key={t.key}
-              disabled={!t.active || busy}
+              disabled={!t.active || busy || recording}
               onPress={() => setType(t.key as CaptureType)}
               accessibilityRole="button"
               accessibilityState={{ disabled: !t.active, selected: t.active && type === t.key }}
@@ -309,6 +353,91 @@ export default function CaptureScreen() {
             </Pressable>
           ))}
         </View>
+
+        {type === "audio" ? (
+          <View className="gap-4">
+            {recording ? (
+              <View className="items-center gap-4 rounded-2xl border border-line bg-card p-6">
+                <View className="flex-row items-center gap-2">
+                  <View className={`h-3 w-3 rounded-full ${rec.status === "recording" ? "bg-red-500" : "bg-amber-400"}`} />
+                  <Text className="font-body-medium text-base text-muted">
+                    {rec.status === "recording"
+                      ? "Kayıt sürüyor"
+                      : rec.status === "paused"
+                        ? "Duraklatıldı"
+                        : rec.status === "interrupted"
+                          ? "Kayıt kesildi (arama ya da sistem)"
+                          : "Kaydediliyor…"}
+                  </Text>
+                </View>
+                <Text className="font-heading text-6xl text-ink" accessibilityLabel={`Kayıt süresi ${formatDuration(rec.elapsedSec)}`}>
+                  {formatDuration(rec.elapsedSec)}
+                </Text>
+                <View className="w-full flex-row gap-3">
+                  {rec.status === "recording" ? (
+                    <Pressable
+                      onPress={rec.pause}
+                      accessibilityRole="button"
+                      className="min-h-[56px] flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-card active:opacity-80"
+                    >
+                      <Ionicons name="pause" size={22} color="#18181B" />
+                      <Text className="font-body-semibold text-base text-ink">Duraklat</Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      onPress={() => void rec.resume()}
+                      disabled={busy}
+                      accessibilityRole="button"
+                      className="min-h-[56px] flex-1 flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-card active:opacity-80"
+                    >
+                      <Ionicons name="mic" size={22} color="#18181B" />
+                      <Text className="font-body-semibold text-base text-ink">Devam</Text>
+                    </Pressable>
+                  )}
+                  <Pressable
+                    onPress={() => void finishRecording()}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    className="min-h-[56px] flex-1 flex-row items-center justify-center gap-2 rounded-2xl bg-primary active:opacity-80"
+                  >
+                    <Ionicons name="stop" size={22} color="#FFFFFF" />
+                    <Text className="font-body-semibold text-base text-white">Bitir</Text>
+                  </Pressable>
+                </View>
+                <Text className="text-center font-body text-sm text-muted">
+                  Ekran kapansa ve uygulama arka planda olsa da kayıt sürer. Bildirimdeki "Kayıt yapılıyor" yazısı bu yüzdendir.
+                </Text>
+              </View>
+            ) : (
+              <>
+                <Pressable
+                  onPress={() => setConsent((c) => !c)}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: consent }}
+                  className="min-h-touch flex-row items-center gap-3 rounded-2xl border border-line bg-card px-4 py-3 active:opacity-80"
+                >
+                  <Ionicons name={consent ? "checkbox" : "square-outline"} size={26} color={consent ? "#4338CA" : "#6B6B66"} />
+                  <Text className="flex-1 font-body-medium text-base text-ink">Hocadan kayıt izni aldım</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void startRecording()}
+                  disabled={!consent || busy}
+                  accessibilityRole="button"
+                  className={`min-h-[64px] flex-row items-center justify-center gap-2 rounded-2xl ${consent && !busy ? "bg-primary active:opacity-80" : "bg-line"}`}
+                >
+                  <Ionicons name="mic" size={24} color={consent && !busy ? "#FFFFFF" : "#6B6B66"} />
+                  <Text className={`font-body-semibold text-lg ${consent && !busy ? "text-white" : "text-muted"}`}>
+                    {rec.status === "starting" ? "Başlıyor…" : "Kaydı başlat"}
+                  </Text>
+                </Pressable>
+                <Text className="font-body text-sm text-muted">
+                  Kayıt 10 dakikalık parçalar halinde cihaza yazılır; uygulama kapanırsa kaldığı yerden kurtarılır. Bitirince arka planda yazıya çevrilir ve bölümlere ayrılır.
+                </Text>
+              </>
+            )}
+            {rec.error ? <Text className="font-body text-sm text-red-700">{rec.error}</Text> : null}
+          </View>
+        ) : null}
 
         {type === "image" ? (
           <View className="gap-3">
@@ -446,6 +575,7 @@ export default function CaptureScreen() {
         {error ? <Text className="font-body text-sm text-red-700">{error}</Text> : null}
       </ScrollView>
 
+      {type !== "audio" ? (
       <View className="px-5" style={{ paddingBottom: insets.bottom + 16 }}>
         <Pressable
           onPress={save}
@@ -457,6 +587,7 @@ export default function CaptureScreen() {
           </Text>
         </Pressable>
       </View>
+      ) : null}
 
       {picking && schedule.semester ? (
         <TargetPicker

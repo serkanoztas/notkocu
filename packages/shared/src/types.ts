@@ -301,6 +301,8 @@ export interface UpdateNoteRequest {
   /** null moves the note back to the inbox; an id requires weekNo. */
   courseId?: Id | null;
   weekNo?: number;
+  /** Audio: "Kalıcı yap" on / off. */
+  pinned?: boolean;
 }
 
 export interface NoteResponse {

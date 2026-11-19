@@ -1,3 +1,4 @@
+import { AUDIO_MAX_TOTAL_BYTES } from "@notkocu/shared";
 import { Directory, File, Paths } from "expo-file-system";
 import { api, ApiError } from "./api";
 
@@ -8,7 +9,7 @@ import { api, ApiError } from "./api";
 // Layout:  <documents>/outbox/<clientId>/entry.json   (written last: a folder without it is junk)
 //                                       /<file name>   (photo / document)
 
-export type OutboxKind = "text" | "image" | "document" | "link";
+export type OutboxKind = "text" | "image" | "document" | "link" | "audio";
 
 /** Where the note goes, decided when it was taken. Absent = the server decides from capturedAt. */
 export interface OutboxTarget {
@@ -32,12 +33,17 @@ export interface OutboxEntry {
   fileName?: string;
   /** Name shown in lists (original file name). */
   displayName?: string;
+  /** Audio: the pieces of the recording, in order (files inside the entry folder) with their measured length. */
+  chunks?: { fileName: string; durationSec: number }[];
+  /** Audio: still being recorded (or the app died while recording). Such an entry is never sent until it is closed. */
+  recording?: boolean;
   /** Set when the server refused the note for good (e.g. storage full); it is not retried by itself. */
   error?: { code: string; message: string };
 }
 
 const outboxDir = () => new Directory(Paths.document, "outbox");
 const entryDir = (clientId: string) => new Directory(outboxDir(), clientId);
+export const entryDirectory = entryDir;
 
 /** Unique enough per user (the server only needs uniqueness, not secrecy). */
 export function newClientId(): string {
@@ -114,6 +120,14 @@ export async function sendEntry(entry: OutboxEntry): Promise<void> {
   const meta = { clientId: entry.clientId, capturedAt: entry.capturedAt, source: entry.source };
   const target = entry.target;
 
+  if (entry.kind === "audio") {
+    const dir = entryDir(entry.clientId);
+    const pieces = (entry.chunks ?? []).map((c) => ({ file: new File(dir, c.fileName), durationSec: c.durationSec }));
+    if (pieces.length === 0 || pieces.some((p) => !p.file.exists)) throw new ApiError("Dosya bulunamadı", 400, "FILE_REQUIRED");
+    if (pieces.reduce((n, p) => n + p.file.size, 0) > AUDIO_MAX_TOTAL_BYTES) throw new ApiError("Kayıt çok büyük", 413, "AUDIO_TOO_LARGE");
+    await api.createAudioNote(pieces.map((p) => p.file.uri), pieces.map((p) => p.durationSec), { ...target }, meta, entry.title);
+    return;
+  }
   if (entry.kind === "image" || entry.kind === "document") {
     if (!entry.fileName) throw new ApiError("Dosya bulunamadı", 400, "FILE_REQUIRED");
     const file = new File(entryDir(entry.clientId), entry.fileName);
@@ -139,6 +153,10 @@ export function errorMessage(err: ApiError): string {
     case "UNSUPPORTED_DOCUMENT_TYPE":
     case "UNSUPPORTED_IMAGE_TYPE":
       return "Dosya türü desteklenmiyor";
+    case "AUDIO_TOO_LARGE":
+      return "Kayıt çok büyük (en fazla 60 MB)";
+    case "UNSUPPORTED_AUDIO_TYPE":
+      return "Ses biçimi desteklenmiyor";
     case "FILE_REQUIRED":
       return "Dosya bulunamadı";
     default:

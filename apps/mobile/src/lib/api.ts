@@ -172,6 +172,23 @@ export const api = {
     form.append("file", new File(fileUri) as unknown as Blob);
     return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: kind === "document" ? 120000 : 60000 });
   },
+  /** A recording: its pieces (in order) and each piece's length in seconds. A long upload, hence the long timeout. */
+  createAudioNote: (fileUris: string[], durationsSec: number[], target: PhotoTarget, meta: UploadMeta, title?: string) => {
+    const form = new FormData();
+    form.append("type", "audio");
+    form.append("clientId", meta.clientId);
+    form.append("capturedAt", meta.capturedAt);
+    form.append("source", meta.source);
+    form.append("chunkDurations", JSON.stringify(durationsSec));
+    if (title) form.append("title", title);
+    if (target.courseId === null) form.append("inbox", "1");
+    else if (target.courseId) {
+      form.append("courseId", target.courseId);
+      if (target.weekNo) form.append("weekNo", String(target.weekNo));
+    }
+    for (const uri of fileUris) form.append("file", new File(uri) as unknown as Blob);
+    return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: 600000 });
+  },
   approveSuggestions: (noteIds: string[]) =>
     request<ApproveSuggestionsResponse>("/api/inbox/approve", { method: "POST", body: { noteIds }, timeoutMs: 15000 }),
   retryNote: (id: string) => request<NoteResponse>(`/api/notes/${id}/retry`, { method: "POST", timeoutMs: 15000 }),

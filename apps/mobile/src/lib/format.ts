@@ -62,3 +62,21 @@ export function formatStamp(iso: string, timeZone: string = DEFAULT_TIME_ZONE): 
   }
   return `${Number(parts.day)} ${MONTHS[Number(parts.month) - 1]}, ${formatClock(iso, timeZone)}`;
 }
+
+/** "31:05" or "1:42:10" (player and recorder clocks). */
+export function formatDuration(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? h + ":" + String(mm).padStart(2, "0") + ":" + ss : mm + ":" + ss;
+}
+
+/** "1 sa 42 dk" / "37 dk" / "45 sn" (lists). */
+export function formatDurationWords(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  if (s < 60) return s + " sn";
+  const h = Math.floor(s / 3600);
+  const mm = Math.round((s % 3600) / 60);
+  return h > 0 ? (mm > 0 ? h + " sa " + mm + " dk" : h + " sa") : mm + " dk";
+}

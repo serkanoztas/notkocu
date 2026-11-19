@@ -6,13 +6,14 @@ import { useOutbox } from "../lib/OutboxProvider";
 import type { OutboxEntry } from "../lib/outbox";
 import { NoteTypeBadge } from "./NoteTypeBadge";
 
-const TYPE: Record<OutboxEntry["kind"], NoteType> = { text: "text", image: "image", document: "document", link: "link" };
+const TYPE: Record<OutboxEntry["kind"], NoteType> = { text: "text", image: "image", document: "document", link: "link", audio: "audio" };
 
 /** First line of what the note will say, from what is on the device. */
 function preview(e: OutboxEntry): string {
   if (e.title) return e.title;
   if (e.kind === "text") return (e.markdown ?? "").split("\n").find((l) => l.trim())?.slice(0, 80) ?? "Not";
   if (e.kind === "link") return e.url ?? "Bağlantı";
+  if (e.kind === "audio") return "Ders kaydı";
   return e.displayName ?? (e.kind === "image" ? "Fotoğraf" : "Belge");
 }
 

@@ -36,6 +36,8 @@ interface OutboxValue {
   entries: OutboxEntry[];
   /** Saves a note on the device and starts sending it; resolves once it is safely on disk. */
   add: (note: NewOutboxNote) => Promise<void>;
+  /** Reads the device again (the recorder writes entries itself) and tries to send. */
+  reload: () => Promise<void>;
   /** Tries to send everything now (also runs on app start, on coming to the foreground and every 30 s). */
   flush: () => Promise<void>;
   /** A note the server refused: clear the error and try again. */
@@ -73,7 +75,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
     if (!uid || flushing.current) return;
     flushing.current = true;
     try {
-      for (const entry of entriesRef.current.filter((e) => e.userId === uid && !e.error)) {
+      for (const entry of entriesRef.current.filter((e) => e.userId === uid && !e.error && !e.recording)) {
         let current = entry;
         for (let tries = 0; tries < 2; tries++) {
           try {
@@ -113,7 +115,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
       const onDisk = await loadEntries();
       for (const e of onDisk) if (e.userId !== userId) removeEntry(e.clientId);
       if (cancelled) return;
-      setAll(onDisk.filter((e) => e.userId === userId));
+      setAll(onDisk.filter((e) => e.userId === userId && !e.recording)); // a recording in progress is the recorder's
       void flush();
     })();
     return () => {
@@ -136,6 +138,14 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
     const id = setInterval(() => void flush(), RETRY_EVERY_MS);
     return () => clearInterval(id);
   }, [waiting, userId, flush]);
+
+  const reload = useCallback(async () => {
+    const uid = userIdRef.current;
+    if (!uid) return;
+    const onDisk = await loadEntries();
+    setAll(onDisk.filter((e) => e.userId === uid && !e.recording));
+    void flush();
+  }, [flush, setAll]);
 
   const add = useCallback(
     async (note: NewOutboxNote) => {
@@ -184,7 +194,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
     setAll([]);
   }, [setAll]);
 
-  const value = useMemo(() => ({ entries, add, flush, retry, discard, clearAll }), [entries, add, flush, retry, discard, clearAll]);
+  const value = useMemo(() => ({ entries, add, flush, reload, retry, discard, clearAll }), [entries, add, flush, reload, retry, discard, clearAll]);
   return <OutboxContext.Provider value={value}>{children}</OutboxContext.Provider>;
 }
 
