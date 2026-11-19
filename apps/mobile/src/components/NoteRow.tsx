@@ -2,7 +2,7 @@ import { useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 import type { NoteItem } from "@notkocu/shared";
 import { useTimeZone } from "../hooks/useNow";
-import { formatClock } from "../lib/format";
+import { formatClock, formatDurationWords } from "../lib/format";
 import { AuthImage } from "./AuthImage";
 import { NoteTypeBadge } from "./NoteTypeBadge";
 
@@ -29,6 +29,15 @@ export function NoteRow({ note, divider }: { note: NoteItem; divider?: boolean }
           <Text className="font-body text-sm text-muted">İşleniyor…</Text>
         ) : note.status === "failed" ? (
           <Text className="font-body text-sm text-red-700">İşlenemedi</Text>
+        ) : note.type === "audio" ? (
+          <Text numberOfLines={1} className="font-body text-sm text-muted">
+            {[
+              note.content.durationSec ? formatDurationWords(note.content.durationSec) : null,
+              note.content.chapters?.length ? `${note.content.chapters.length} bölüm` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </Text>
         ) : note.type === "link" ? (
           <Text numberOfLines={1} className="font-body text-sm text-muted">
             {note.content.url}
