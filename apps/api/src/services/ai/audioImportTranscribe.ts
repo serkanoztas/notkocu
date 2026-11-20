@@ -92,6 +92,8 @@ export async function transcribeImported(opts: {
   beforeRequest: () => Promise<void>;
   /** Called after every request with everything so far (the worker stores it as progress). */
   onProgress: (progress: ImportedProgress) => Promise<void>;
+  /** Optional, for measuring (scripts/measure-import.ts): one call per request, with the provider's token counts. */
+  onRequest?: (info: { index: number; after: number; segments: number; truncated: boolean; promptTokens?: number; outputTokens?: number }) => void;
 }): Promise<Segment[]> {
   const { file, durationSec } = opts;
   if (opts.resume?.complete) return opts.resume.segments;
@@ -109,6 +111,7 @@ export async function transcribeImported(opts: {
         : `${total} Daha önce ${clock(after)} noktasına kadar olan kısmı yazdın. Şimdi ${clock(after)} noktasından SONRASINDAKİ konuşmadan başlayarak devam et.`;
     let raw: string | undefined;
     let truncated = false;
+    let usage: { promptTokens?: number; outputTokens?: number } = {};
     try {
       const { model, thinkingConfig } = geminiTask("audio");
       const res = await generateContent({
@@ -125,11 +128,13 @@ export async function transcribeImported(opts: {
       });
       raw = res.text;
       truncated = res.candidates?.[0]?.finishReason === "MAX_TOKENS";
+      usage = { promptTokens: res.usageMetadata?.promptTokenCount, outputTokens: res.usageMetadata?.candidatesTokenCount };
     } catch (err) {
       throw toAiError(err, "audio transcript");
     }
 
     const received = readSegments(raw ?? "", truncated, durationSec);
+    opts.onRequest?.({ index: i, after, segments: received.length, truncated, ...usage });
     const fresh = after < 0 ? received : received.filter((s) => s.startSec > after);
     if (fresh.length === 0 && truncated) throw new OcrError("AI_BAD_OUTPUT"); // cut off without moving forward
     segments = [...segments, ...fresh];

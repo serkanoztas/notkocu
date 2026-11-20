@@ -13,6 +13,7 @@
     "check-docs": "tsx scripts/check-docs.ts",
     "check-queue": "tsx scripts/check-queue.ts",
     "check-http": "tsx scripts/check-http.ts",
+    "measure-import": "tsx scripts/measure-import.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

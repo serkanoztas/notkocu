@@ -66,8 +66,8 @@ NoteItem    { _id, userId,
               suggestion?: { courseId, weekNo, confidence },  // gelen kutusu için
               clientId?, capturedAt?,                         // outbox: aynı clientId ikinci not yaratmaz; capturedAt notun alındığı an (createdAt ona eşit)
               job {...}, suggestJob {...},                    // kuyruk kayıtları, istemciye gitmez
-              status: "pending"|"processing"|"ready"|"failed",
-              source: "app"|"share-intent",
+              status: "pending"|"processing"|"ready"|"failed"|"skipped",  // skipped: saklandı ama işlenmedi (AUDIO_MAX_PROCESS_MIN'den uzun ses)
+              source: "app"|"share-intent"|"import",          // import: dosyadan eklenen ses (paylaşımla gelen ses share-intent kalır)
               tags[], createdAt, updatedAt }
 
 WeekSummary { _id, userId, courseId, weekNo, summary,
@@ -83,7 +83,7 @@ Tipe özel `content` alanları:
 | text | `markdown` |
 | document | `fileKey`, `mime`, `pageCount`, `pages[]` (sayfa başına metin) |
 | image | `fileKey` (işlenmiş görsel), `thumbKey` (~200 px küçük resim, yoksa boş), `mime`, `width`, `height`, `ocrMarkdown` |
-| audio | `chunks[]` (`fileKey`, `startSec`, `durationSec`, `size`, `mime`; ~10 dk'lık parçalar), `durationSec`, `transcript[]` (küresel zaman damgalı), `chapters[]`, `audioExpiresAt`, `pinned`, `audioDeleted` |
+| audio | `chunks[]` (`fileKey`, `startSec`, `durationSec`, `size`, `mime`; ~10 dk'lık parçalar), `durationSec`, `transcript[]` (küresel zaman damgalı), `chapters[]`, `audioExpiresAt`, `pinned`, `audioDeleted`, `imported` (dışarıdan eklenen dosya: tek parça = tüm kayıt), `skipReason` (`too_long`) |
 | link | `url`, `siteTitle`, `thumbnail` |
 | task | `dueAt`, `remindAt`, `done` |
 | code | `language`, `code` |
@@ -112,7 +112,7 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 | Metin | Yok (anında `ready`) | Markdown'ın kendisi |
 | Belge | PDF'te metin katmanı okunur; DOCX/PPTX metni saf JS ile çıkarılır (LibreOffice yok); metin katmanı olmayan ya da çok az olan PDF Gemini'ye PDF olarak gider | Sayfa/slayt/bölüm bazında metin |
 | Görsel | Gemini görsel girdisiyle OCR yapılır ve not düzenli Markdown'a çevrilir | `ocrMarkdown` |
-| Ses | Gemini ses girdisiyle zaman damgalı transkript çıkarılır; ardından bölüm başlıkları ve özet üretilir | Transkript |
+| Ses | Gemini ses girdisiyle zaman damgalı transkript çıkarılır; ardından bölüm başlıkları ve özet üretilir. Uygulamada kaydedilen ses ~10 dk'lık parçalar halinde satır içi gider; dışarıdan eklenen dosya Files API'ye bir kez yüklenir ve tek istekle çevrilir (aşağıda Aşama 5b) | Transkript |
 | Link | Sayfa başlığı ve açıklaması çekilir, kısa özet yazılır | Başlık + özet |
 | Görev | Yok; `remindAt` için zamanlanmış push bildirimi kurulur | Başlık |
 | Kod | Yok | Kodun kendisi |
@@ -164,6 +164,17 @@ Kullanıcı hiç beklemez: not, yüklendiği anda `pending` olarak görünür, a
 - **Mobil oynatma:** parçalar yetkili indirmeyle önbelleğe iner, **yerel `AudioPlaylist`** ile çalınır (planda iki oynatıcıyla elle önyükleme düşünülmüştü; yerel liste sonraki parçayı kendisi önyüklediği için daha az kod ve daha küçük boşluk). Konum her yerde küresel zaman: bölüm/satır/çubuk dokunuşu `locateChunk` ile parçayı bulur (sınıra denk zaman sonraki parçanın 0'ı), gerekirse `skipTo` + `seekTo`. Hız 1/1,5/2×, ±15 sn. Dalga formu yerine ilerleme çubuğu (dalga formu ses analizi ister).
 - **Hafta sayfası:** özet kartı ("N nottan", "Özet hazırlanıyor…", hazırlanırken 4 sn'de bir yenileme), "Tipe göre" (Ses, Görsel ızgarası, Belge·Metin·…) ve "Zaman çizelgesi" (gün başlıkları). Paylaş butonu Aşama 6'da. Ders sayfasındaki hafta kartı özeti göstermez (özet yalnızca hafta sayfası açılınca üretilir).
 - **Doğrulama:** `check-queue` (ses parçası bazlı yeniden deneme, saklama süpürmesi, haftalık özet hattı), `check-http` (ses yükleme/sniff/limit, uçtan uca transkript, pin/geri alma, hafta sayfası tetikleyicisi), `packages/shared` testleri (`locateChunk`). Hepsi sahte Gemini ile; çalıştırırken worker kapalı olmalı. ADTS çıktısı, arka plan kaydı, kesinti/kurtarma ve parça geçişi yalnızca cihazda doğrulanabilir. Cihaz testi: arka plan kaydı (ekran kapalı), transkript, atlama ve hafta sayfası doğrulandı; **arama kesintisi (otomatik yeni parça / "Devam") cihazda test edilmedi.**
+
+**Aşama 5b: dışarıdan ses dosyası ekleme ve ses kota korumaları (kararlar ve uygulama):**
+
+- **Giriş noktaları:** Hızlı yakalama → Ses → "Dosyadan ekle" (`expo-document-picker`, `audio/*`) ve Paylaş → NotKoçu (WhatsApp `.opus` vb. Ses tipiyle açılır). Yeni native paket yok. Not kaynağı: dosyadan eklenen `import` ("İçe aktarıldı"), paylaşımla gelen `share-intent` ("Paylaşımdan").
+- **Biçimler (Gemini dokümanı, `aistudio.google.com/docs/audio`):** wav, mp3, aiff, aac, ogg, flac, m4a, opus… **AMR listede yok → reddedilir** (kendi hata mesajıyla). WhatsApp `.opus` Ogg kapsayıcıdır, `audio/ogg` olarak gönderilir. Tür yine ilk baytlardan okunur (`OggS`, `ID3`/MPEG sync, `RIFF…WAVE`, `fLaC`, ADTS, MP4); istemci MIME'ına güvenilmez.
+- **Yükleme:** `POST /api/notes?import=1` (multipart, tek `file`). Boyut sınırı **100 MB** (kayıtlarınki 60 MB, parça 8 MB, aynen kalır); kullanıcı depolama kotası geçerli. Süre sunucuda saf JS `music-metadata` ile dosyadan okunur (ffmpeg yok); okunamazsa bit hızından tahmin, o da yoksa 400 `UNREADABLE_AUDIO`. Not tek parçadır (`chunks[0]` = tüm süre, `content.imported = true`); oynatıcı ve küresel zaman mantığı değişmez. Saklama (30 gün) ve "Kalıcı yap" aynen geçerli.
+- **Hedef ve tarih:** otomatik atama kuralı **uygulanmaz**. Varsayılan gelen kutusu (`capturedAt` = içe aktarma anı; AI önerisi transkriptten çalışır). Ders + hafta seçilirse `capturedAt` o haftanın o dersinin oturum saatidir (`sessionDateTime`, kullanıcının saat diliminde); derste o hafta birden fazla oturum varsa kullanıcı oturumu seçer (`sessionId`, yoksa 400 `SESSION_REQUIRED`), tek oturum varsa otomatik. Gelecek bir an şimdiye kıstırılır.
+- **Transkript stratejisi (maliyet):** Dosya Files API'ye iş başına bir kez yüklenir (yeniden denemede `files.get` ile yeniden kullanılır, iş bitince ya da hakları bitince silinir). Denendi: `videoMetadata` `startOffset/endOffset` ile ses kırpma **API tarafından reddediliyor** (`video_metadata is not supported for non-video MIME type 'audio/wav'`, hem satır içi hem Files API'de), bu yüzden "15 dk'lık aralıklara kırpma" yapılamaz. Aralığı prompt'ta istemek her istekte tüm dosyayı yeniden faturalar (90 dk ≈ 135k token × aralık sayısı), bu yüzden **kullanılmadı**. Seçilen yöntem: tüm transkript **tek istekte**; `maxOutputTokens` olarak modelin kendi çıktı sınırı kullanılır (`models.get` → `outputTokenLimit`, model başına önbellekte; yedek modelle ikisinin küçüğü; okunamazsa 8192). Cevap `finishReason = MAX_TOKENS` ile kesilirse kesik JSON'daki son tam segment kurtarılır ve son zaman damgasından devam isteği gönderilir. Her isteğin sonucu `job.progress.seg`'e yazılır (kira süresi uzar); yeniden deneme kalınan yerden sürer, yükleme tekrarlanmaz. En çok 40 devam; ilerleme yoksa `AI_BAD_OUTPUT`. Bölüm ve özet aynı şekilde transkript metninden. Gerçek bir kayıtla kaç devam gerektiğini ölçmek için: `npm run measure-import -- "<dosya>"` (varsayılan sahte Gemini; gerçek istek için `CHECK_REAL_GEMINI=1`).
+- **Kota korumaları (canlı kayıt ve içe aktarılan tüm ses):** `AUDIO_MAX_PROCESS_MIN` (varsayılan 120): daha uzun kayıt `status: "skipped"` (`content.skipReason = "too_long"`) olarak saklanır, kuyruğa girmez, dinlenebilir, 30 gün/Kalıcı yap geçerli; `/retry` 409. Not detayı: "Bu kayıt N dk'dan uzun, otomatik işlenmedi. Önemli kısmını kırpıp tekrar yükleyebilirsin." `AUDIO_DAILY_BUDGET_MIN` (varsayılan 180): kullanıcının **yerel günü** başına işlenecek ses dakikası (`AudioUsage {userId, day, seconds}`, atomik koşullu `$inc`; not ilk sahiplenmede bir kez düşer, yeniden deneme çift saymaz). Bütçe dolunca not `pending` kalır, `job.runAt` = kullanıcının ertesi gün 00:00'ı, `job.budgetDeferred` (uygulamada "Sırada, yarın işlenecek"); **deneme ve erteleme sayaçlarını tüketmez**. Tek kayıt tüm bütçeden büyükse kullanılmamış günde çalışır. Düşülen bütçe iade edilmez. Haftalık özet ve bölüm çağrıları bütçeye sayılmaz. Mobil: limit `GET /api/me/storage` yanıtındaki `limits.audioMaxProcessMin`'den gelir; canlı kayıt bu süreyi geçince durmaz, "Bu kayıt otomatik işlenmeyecek" uyarısı çıkar; içe aktarmada dosya seçilince süre gösterilir ve limit aşılıyorsa Kaydet'ten önce aynı uyarı çıkar.
+- **Mobil:** içe aktarılan not outbox'a `imported: true` ile tek dosya olarak yazılır (`target.sessionId` dahil), `?import=1` ile gönderilir. Oynatıcı önbellek dosyasının uzantısı artık parçanın `mime`'ından gelir (aac/m4a/mp3/wav/ogg/flac). Ogg/Opus, mp3 ve wav'ın Android'de çalınması cihazda doğrulanacak.
+- **Doğrulama:** `check-http` (import yükleme, AMR/sahte/okunamayan ses, 9 MB kabul, oturum seçimi, `skipped`), `check-queue` (tek istek, kesik JSON'da devam, 503 sonrası kalınan yerden sürme ve tek yükleme, günlük bütçe, `skipped` saklama süpürmesi), `packages/shared` testleri (`sessionDateTime`, yerel gün yardımcıları). Hepsi sahte Gemini ile. Not: bu geliştirme ortamındaki Atlas bağlantısında GridFS okuma bazen çok yavaş çıktı (1 MB ≈ 1 dk); testlerdeki ses dosyaları bu yüzden küçük tutuldu.
 
 **Haftalık özet:** Haftanın tüm `extractedText` alanları tek bir prompt'ta birleştirilir. Gemini, 3–5 cümlelik özet ve hangi notlardan beslendiğini döner. Uzun ses transkriptlerinde ham metin yerine notun kendi `aiSummary` alanı kullanılır; böylece prompt kısa kalır.
 
@@ -292,7 +303,7 @@ Uygulama içinde paylaşım sistemi kurulmaz. Dışarıyla alışveriş tamamen 
 **İçeri (WhatsApp vb. → NotKoçu):**
 
 - Uygulama paylaşım menüsünde hedef olarak görünür (`expo-share-intent`; Expo dev build gerektirir).
-- Gelen PDF, görsel ya da link `source: "share-intent"` ile not olarak oluşur. Otomatik atama kuralı burada da çalışır: ders saatindeyse o haftaya, değilse gelen kutusuna gider.
+- Gelen PDF, görsel, ses ya da link `source: "share-intent"` ile not olarak oluşur (ses: Ses tipinde, içe aktarma modunda açılır; ders ve hafta kullanıcıya seçtirilir, varsayılan gelen kutusu, aşağıdaki otomatik atama kuralı sesler için uygulanmaz). Otomatik atama kuralı burada da çalışır: ders saatindeyse o haftaya, değilse gelen kutusuna gider.
 
 ## MVP yol haritası
 
@@ -305,6 +316,7 @@ MVP, haftada yaklaşık 15–20 saat çalışmayla 6 haftalık bir plan olarak �
    - [x] **4a:** görsel notlar (kamera/galeri), GridFS, Mongo kuyruğu + worker, Gemini OCR, depolama sınırı (Android cihazda test edildi)
    - [x] **4b:** belge (PDF/PPTX/DOCX) + link notu, gelen kutusu AI ders önerisi, çevrimdışı not kuyruğu (outbox), Paylaş → NotKoçu (Android cihazda test edildi)
 5. [x] **Ses ve AI özetleri:** ses kaydı + transkript; haftalık özet; not detay ekranları (Android cihazda test edildi: ekran kapalıyken kayıt, transkript kalitesi, bölüm/satıra dokunup atlama, hafta özeti, Tipe göre/Zaman çizelgesi. **Test edilmedi:** arama/sistem kesintisi sırasında kayıt davranışı)
+   - [ ] **5b (Aşama 5'e ek):** dışarıdan ses dosyası ekleme (Hızlı yakalama → Ses → "Dosyadan ekle" ve Paylaş → NotKoçu) + ses kota korumaları. Kod, API ve worker testleri tamam (sahte Gemini); Android cihaz testi ve gerçek kayıtla devam isteği ölçümü (`npm run measure-import`) bekliyor
 6. [ ] **Dışa aktarma ve test:** PDF + paylaşım menüsü; push bildirimleri; sınıf arkadaşlarıyla test; **preview build'de uçak modunda çevrimdışı açılış doğrulaması** (dev build'de uçak modu Metro'ya erişimi kestiği için test edilemez; 4a'da yalnızca API kapalıyken açılış doğrulandı)
 
 **Kurulum notları (Google girişi):**
@@ -323,7 +335,7 @@ Sıralama bilinçli: Program içe aktarma en erken yapılıyor, çünkü otomati
 
 | Konu | Risk | Önlem |
 | --- | --- | --- |
-| AI maliyeti | 1,5 saatlik ses kayıtlarının transkripti en pahalı iş | Kullanıcı başına aylık dakika limiti; Flash Lite modeli; kaydı parçalara bölüp işlemek |
+| AI maliyeti | 1,5 saatlik ses kayıtlarının transkripti en pahalı iş; dışarıdan eklenen uzun dosyada her devam isteği tüm sesi yeniden faturalar | Kayıt başına işleme sınırı (`AUDIO_MAX_PROCESS_MIN`) ve kullanıcı başına günlük bütçe (`AUDIO_DAILY_BUDGET_MIN`); Flash Lite modeli; içe aktarmada modelin en yüksek çıktı sınırıyla tek istek, devam yalnızca istisna; canlı kayıt 10 dk'lık parçalara bölünür |
 | Program okuma doğruluğu | OBS ekranı farklı çıktığında dersler yanlış okunabilir | Onay ekranı zorunlu; düşük güven vurgusu; gerçek örneklerle test |
 | Ses kaydı izni | Bazı hocalar kayda izin vermiyor | Kayıt öncesi "izin aldım" onayı; kayıtlar sadece kullanıcıya özel |
 | Kişisel veri (KVKK) | Ses ve görsellerde başkalarının sesi ya da yüzü olabilir | Dosyalar özel depoda (GridFS), yalnızca sahibine auth'lu akışla verilir; hesap silinince tüm veri ve dosyalar siliniyor |
