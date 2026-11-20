@@ -7,8 +7,10 @@ export type ISODate = string;
 export type WeekStatusKind = "normal" | "holiday" | "midterm" | "final";
 export type SessionKind = "teori" | "lab" | "uygulama";
 export type NoteType = "text" | "document" | "image" | "audio" | "link" | "task" | "code";
-export type NoteStatus = "pending" | "processing" | "ready" | "failed";
-export type NoteSource = "app" | "share-intent";
+/** `skipped`: stored but deliberately not processed (e.g. a recording over AUDIO_MAX_PROCESS_MIN). */
+export type NoteStatus = "pending" | "processing" | "ready" | "failed" | "skipped";
+/** `import`: an audio file added from the file picker (a share-intent import keeps `share-intent`). */
+export type NoteSource = "app" | "share-intent" | "import";
 
 export interface User {
   _id: Id;
@@ -111,6 +113,10 @@ export interface AudioContent {
   pinned?: boolean;
   /** The audio files were deleted by retention. */
   audioDeleted?: boolean;
+  /** An external file (one chunk = the whole recording) rather than a recording made in the app. */
+  imported?: boolean;
+  /** Why the note is `skipped`. */
+  skipReason?: "too_long";
 }
 export interface LinkContent {
   url: string;

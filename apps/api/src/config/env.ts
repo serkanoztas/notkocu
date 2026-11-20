@@ -20,6 +20,10 @@ const schema = z.object({
   // MINIMAL is skipped automatically for models that do not support it.
   // Per-user file storage cap (GridFS), in MB.
   USER_STORAGE_LIMIT_MB: z.coerce.number().positive().default(200),
+  // Audio quota guards (live recordings and imports): a longer recording is stored but not processed;
+  // the daily budget is per user and per local day, further audio waits for the next day.
+  AUDIO_MAX_PROCESS_MIN: z.coerce.number().positive().default(120),
+  AUDIO_DAILY_BUDGET_MIN: z.coerce.number().positive().default(180),
   GEMINI_THINKING_LEVEL: z.enum(["MINIMAL", "LOW"]).default("MINIMAL"),
 });
 

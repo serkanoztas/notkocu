@@ -139,3 +139,61 @@ export function matchesSessionWindow(
   const to = parseHHmm(session.end) + SESSION_WINDOW_AFTER_MIN;
   return minutes >= from && minutes <= to;
 }
+
+/** "YYYY-MM-DD" of `date` in the time zone (the user's local day; used as a daily-budget key). */
+export function localDateKey(date: Date, timeZone: string = DEFAULT_TIME_ZONE): string {
+  const p = localParts(date, timeZone);
+  return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+}
+
+/** The instant at which the given local wall-clock time happens in the time zone (DST-safe, two passes). */
+export function zonedTimeToDate(
+  parts: { year: number; month: number; day: number; hour?: number; minute?: number },
+  timeZone: string = DEFAULT_TIME_ZONE,
+): Date {
+  const wanted = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour ?? 0, parts.minute ?? 0);
+  let guess = wanted;
+  for (let i = 0; i < 2; i++) {
+    const p = localParts(new Date(guess), timeZone);
+    const shown = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
+    guess += wanted - shown;
+  }
+  return new Date(guess);
+}
+
+/** 00:00 of the local day after `date`'s local day. */
+export function startOfNextLocalDay(date: Date, timeZone: string = DEFAULT_TIME_ZONE): Date {
+  const p = localParts(date, timeZone);
+  const next = new Date(Date.UTC(p.year, p.month - 1, p.day + 1));
+  return zonedTimeToDate(
+    { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() },
+    timeZone,
+  );
+}
+
+/**
+ * When a session of semester week `week` takes place (its start time on its day): week 1 covers the 7
+ * calendar days from the semester start date, the same days `weekNo()` counts. Used as `capturedAt` of
+ * audio imported for a past lesson.
+ */
+export function sessionDateTime(
+  semester: { startDate: string },
+  session: SessionTime,
+  week: number,
+  timeZone: string = DEFAULT_TIME_ZONE,
+): Date {
+  const first = localParts(new Date(semester.startDate), timeZone);
+  const offset = (session.day - first.weekday + 7) % 7;
+  const day = new Date(Date.UTC(first.year, first.month - 1, first.day + (week - 1) * 7 + offset));
+  const minutes = parseHHmm(session.start);
+  return zonedTimeToDate(
+    {
+      year: day.getUTCFullYear(),
+      month: day.getUTCMonth() + 1,
+      day: day.getUTCDate(),
+      hour: Math.floor(minutes / 60),
+      minute: minutes % 60,
+    },
+    timeZone,
+  );
+}

@@ -13,6 +13,13 @@ export const AUDIO_RETENTION_DAYS = 30;
 /** Un-pinning never leaves less than this many days before deletion. */
 export const AUDIO_UNPIN_GRACE_DAYS = 7;
 
+/** An imported file (one piece, any supported format) may be up to this big. */
+export const AUDIO_IMPORT_MAX_BYTES = 100 * 1024 * 1024;
+/** Fallback for AUDIO_MAX_PROCESS_MIN when the app cannot reach the API setting. */
+export const AUDIO_MAX_PROCESS_MIN_DEFAULT = 120;
+/** Extensions the app offers to import (the server decides by the first bytes, not by this). */
+export const AUDIO_IMPORT_EXTENSIONS = ["opus", "ogg", "oga", "m4a", "mp3", "wav", "flac", "aac"] as const;
+
 export interface TimedChunk {
   startSec: number;
   durationSec: number;

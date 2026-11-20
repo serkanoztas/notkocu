@@ -96,3 +96,34 @@ describe("matchesSessionWindow", () => {
     expect(matchesSessionWindow(sunLate, at("2026-11-09T00:10:00+03:00"), IST)).toBe(false);
   });
 });
+
+import { localDateKey, sessionDateTime, startOfNextLocalDay, zonedTimeToDate } from "./time";
+
+describe("zoned helpers (Europe/Istanbul, UTC+3)", () => {
+  it("zonedTimeToDate and localDateKey agree", () => {
+    const d = zonedTimeToDate({ year: 2026, month: 3, day: 2, hour: 9, minute: 30 }, "Europe/Istanbul");
+    expect(d.toISOString()).toBe("2026-03-02T06:30:00.000Z");
+    expect(localDateKey(new Date("2026-03-02T22:30:00Z"), "Europe/Istanbul")).toBe("2026-03-03");
+  });
+  it("startOfNextLocalDay is local midnight", () => {
+    expect(startOfNextLocalDay(new Date("2026-03-02T22:30:00Z"), "Europe/Istanbul").toISOString()).toBe("2026-03-03T21:00:00.000Z");
+    expect(startOfNextLocalDay(new Date("2026-03-02T10:00:00Z"), "Europe/Istanbul").toISOString()).toBe("2026-03-02T21:00:00.000Z");
+  });
+  it("is DST-safe (America/New_York spring forward)", () => {
+    const d = zonedTimeToDate({ year: 2026, month: 3, day: 9, hour: 9 }, "America/New_York");
+    expect(d.toISOString()).toBe("2026-03-09T13:00:00.000Z");
+  });
+});
+
+describe("sessionDateTime", () => {
+  const sem = { startDate: "2026-02-16T00:00:00+03:00" }; // a Monday
+  it("week 1 Monday and week 3 Wednesday", () => {
+    expect(sessionDateTime(sem, { day: 0, start: "09:30", end: "11:20" }, 1, "Europe/Istanbul").toISOString()).toBe("2026-02-16T06:30:00.000Z");
+    expect(sessionDateTime(sem, { day: 2, start: "13:00", end: "14:50" }, 3, "Europe/Istanbul").toISOString()).toBe("2026-03-04T10:00:00.000Z");
+  });
+  it("a semester that starts mid-week: days before the start weekday fall later in week 1", () => {
+    const wed = { startDate: "2026-02-18T00:00:00+03:00" };
+    // Monday of week 1 is the following Monday (Feb 23); it still counts as week 1 by weekNo (Feb 18..24)
+    expect(sessionDateTime(wed, { day: 0, start: "09:00", end: "10:00" }, 1, "Europe/Istanbul").toISOString()).toBe("2026-02-23T06:00:00.000Z");
+  });
+});

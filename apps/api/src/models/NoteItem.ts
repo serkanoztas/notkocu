@@ -57,7 +57,7 @@ const noteItemSchema = new Schema(
     suggestion: suggestionSchema,
     status: {
       type: String,
-      enum: ["pending", "processing", "ready", "failed"],
+      enum: ["pending", "processing", "ready", "failed", "skipped"],
       default: "pending",
     },
     job: { type: jobSchema, default: () => ({}) },
@@ -67,7 +67,7 @@ const noteItemSchema = new Schema(
     clientId: String,
     // When the note was actually taken (the outbox may deliver it later); createdAt follows it.
     capturedAt: Date,
-    source: { type: String, enum: ["app", "share-intent"], default: "app" },
+    source: { type: String, enum: ["app", "share-intent", "import"], default: "app" },
     tags: { type: [String], default: [] },
   },
   { timestamps: true },
