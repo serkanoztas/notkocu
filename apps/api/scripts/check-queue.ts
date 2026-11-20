@@ -4,14 +4,14 @@ import mongoose from "mongoose";
 import sharp from "sharp";
 import { env } from "../src/config/env";
 import { semesterWeekNo } from "@notkocu/shared";
-import { CourseModel, NoteItemModel, SemesterModel, WeekSummaryModel } from "../src/models";
+import { AudioUsageModel, CourseModel, NoteItemModel, SemesterModel, WeekSummaryModel } from "../src/models";
 import { deleteFiles, deleteUserFiles, getUsage, openFile, saveFile } from "../src/services/files";
 import { processImage, sniffImageMime } from "../src/services/imageProcess";
 import { processAudio } from "../src/services/audioProcess";
 import { pinnedAudioBytes, sweepExpiredAudio, unpinDeadline } from "../src/services/audioRetention";
 import { claimNext, complete, defer, fail, requeue, sweepExhausted } from "../src/services/queue";
 import { buildWeekInput } from "../src/services/ai/weekSummary";
-import { markWeeksStale } from "../src/services/notes";
+import { markWeeksStale, serializeNote } from "../src/services/notes";
 import { processSuggest } from "../src/services/suggest";
 import { processWeekSummary, weekSummaryView } from "../src/services/weekSummary";
 import { claimNextWeekSummary } from "../src/services/weekSummaryQueue";
@@ -35,6 +35,7 @@ async function cleanup() {
   await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SemesterModel.deleteMany({ userId: { $in: [userA, userB] } });
   await WeekSummaryModel.deleteMany({ userId: { $in: [userA, userB] } });
+  await AudioUsageModel.deleteMany({ userId: { $in: [userA, userB] } });
   await deleteUserFiles(userA);
   await deleteUserFiles(userB);
 }
@@ -395,6 +396,135 @@ async function main() {
         check("audio: chapters + summary + extractedText filled", c.chapters?.length === 2 && !!doc?.aiSummary && /normal form/i.test(doc?.extractedText ?? ""));
         check("audio: progress bookkeeping cleared", !(doc?.job as { progress?: unknown } | undefined)?.progress);
         env.GEMINI_FALLBACK_MODEL = savedFallback;
+      }
+
+      // --- imported audio: ONE file, Files API once, one request (continued only when cut off), daily budget ---
+      {
+        const savedFallback = env.GEMINI_FALLBACK_MODEL;
+        env.GEMINI_FALLBACK_MODEL = undefined;
+        const wavKey = (userId = userA) => saveFile(userId, Buffer.concat([Buffer.from("RIFF....WAVEfmt "), Buffer.alloc(400, 5)]), { mime: "audio/wav", filename: "i.wav" });
+        const importedNote = async (durationSec: number, userId = userA) =>
+          NoteItemModel.create({
+            userId,
+            courseId: null,
+            type: "audio",
+            title: "İçe aktarılan ses",
+            status: "pending",
+            source: "import",
+            content: {
+              imported: true,
+              durationSec,
+              chunks: [{ fileKey: await wavKey(userId), startSec: 0, durationSec, size: 416, mime: "audio/wav" }],
+            },
+          });
+        const transcriptOf = async (id: unknown) =>
+          ((await NoteItemModel.findById(id))?.content as { transcript?: { startSec: number }[] } | undefined)?.transcript ?? [];
+
+        // 1) a short recording: one request, with the model's own output limit; the upload is made once and deleted
+        gemini.setOutputLimit(40000);
+        gemini.setImportScript({ durationSec: 600, perResponse: 1000 });
+        let files0 = gemini.filesCalls();
+        let note = await importedNote(600);
+        await processAudio((await claimNext({ _id: note._id }))!);
+        let reqs = gemini.importRequests();
+        let doc = await NoteItemModel.findById(note._id);
+        check("import: one request for a recording that fits the output limit", reqs.length === 1 && reqs[0]!.after === -1);
+        check("import: maxOutputTokens is the model's limit from models.get (not a small constant)", reqs[0]!.maxOutputTokens === 40000);
+        check("import: Files API upload once, deleted when done", gemini.filesCalls().upload - files0.upload === 1 && gemini.filesCalls().delete - files0.delete === 1);
+        check("import: ready, global transcript from 5 s, chapters + summary", doc?.status === "ready" && (await transcriptOf(note._id))[0]?.startSec === 5 && !!doc?.aiSummary);
+        check("import: progress bookkeeping cleared", !(doc?.job as { progress?: unknown } | undefined)?.progress);
+
+        // 2) cut off twice (JSON cut mid-segment): continued from the last complete time stamp, no duplicates, one upload
+        gemini.setImportScript({ durationSec: 3000, perResponse: 40, cutJson: true });
+        files0 = gemini.filesCalls();
+        note = await importedNote(3000);
+        await processAudio((await claimNext({ _id: note._id }))!);
+        reqs = gemini.importRequests();
+        const t2 = await transcriptOf(note._id);
+        check("import: cut-off answers are continued after the last complete segment", JSON.stringify(reqs.map((r) => r.after)) === "[-1,1145,2315]");
+        check("import: every segment exactly once, in order", t2.length === 100 && t2.every((s, i) => s.startSec === 5 + 30 * i));
+        check("import: still one upload for all the requests", gemini.filesCalls().upload - files0.upload === 1 && gemini.filesCalls().delete - files0.delete === 1);
+
+        // 3) a continuation fails (503): the retry resumes after the saved point, no new upload
+        gemini.setImportScript({ durationSec: 3000, perResponse: 40, cutJson: true });
+        files0 = gemini.filesCalls();
+        note = await importedNote(3000);
+        gemini.failOnCall(2, 503);
+        const first = (await claimNext({ _id: note._id }))!;
+        let threw = "";
+        try {
+          await processAudio(first);
+        } catch (err) {
+          threw = (err as Error).name;
+        }
+        const seg = ((await NoteItemModel.findById(note._id))?.job as { progress?: { seg?: { doneUntilSec: number; complete: boolean } } } | undefined)?.progress?.seg;
+        check("import: request 1 saved before request 2 failed", threw === "QuotaError" && seg?.doneUntilSec === 1145 && seg.complete === false);
+        check("import: the upload is kept for the retry", gemini.filesCalls().delete === files0.delete);
+        await defer(first, "unavailable");
+        await NoteItemModel.updateOne({ _id: note._id }, { "job.runAt": new Date(Date.now() - 1000) });
+        await processAudio((await claimNext({ _id: note._id }))!);
+        check("import: the retry continues from the saved point (no restart, no second upload)", JSON.stringify(gemini.importRequests().map((r) => r.after)) === "[-1,1145,2315]" && gemini.filesCalls().upload - files0.upload === 1);
+        check("import: resumed transcript is complete and ordered", (await transcriptOf(note._id)).length === 100 && (await NoteItemModel.findById(note._id))?.status === "ready");
+        env.GEMINI_FALLBACK_MODEL = savedFallback;
+
+        // 4) daily budget (live and imported alike): the note over budget waits for the user's next day
+        gemini.setImportScript({ durationSec: 200, perResponse: 1000 });
+        const savedBudget = env.AUDIO_DAILY_BUDGET_MIN;
+        env.AUDIO_DAILY_BUDGET_MIN = 5; // 300 s
+        const budgetUser = new mongoose.Types.ObjectId().toHexString();
+        try {
+          const b1 = await importedNote(200, budgetUser);
+          await processAudio((await claimNext({ _id: b1._id }))!);
+          check("budget: first recording fits and is processed", (await NoteItemModel.findById(b1._id))?.status === "ready");
+          const b2 = await importedNote(200, budgetUser);
+          const claimed = (await claimNext({ _id: b2._id }))!;
+          const callsBefore = gemini.calls();
+          const processed = await processAudio(claimed);
+          const d2 = await NoteItemModel.findById(b2._id);
+          const wait = +(d2?.job?.runAt ?? 0) - Date.now();
+          check("budget: over budget -> pending, waits for the user's next day, nothing sent to Gemini", processed === false && d2?.status === "pending" && wait > 0 && wait <= 24 * 3600 * 1000 && gemini.calls() === callsBefore);
+          check("budget: waiting does not use up attempts or deferrals", (d2?.job?.attempts ?? 0) === 0 && (d2?.job?.deferrals ?? 0) === 0 && d2?.job?.budgetDeferred === true);
+          check("budget: the app is told it is waiting for tomorrow", serializeNote(d2!.toJSON()).budgetDeferred === true);
+          check("budget: not claimable before the next day", (await claimNext({ _id: b2._id })) === null);
+          // a day later: the old day's ledger no longer counts
+          await AudioUsageModel.deleteMany({ userId: budgetUser });
+          await NoteItemModel.updateOne({ _id: b2._id }, { "job.runAt": new Date(Date.now() - 1000) });
+          await processAudio((await claimNext({ _id: b2._id }))!);
+          const d2b = await NoteItemModel.findById(b2._id);
+          check("budget: next day it is processed by itself", d2b?.status === "ready" && !d2b.job?.budgetDeferred);
+          // a retry of a charged note never charges twice
+          const used = (await AudioUsageModel.findOne({ userId: budgetUser }))?.seconds;
+          const b3 = await importedNote(100, budgetUser);
+          await NoteItemModel.updateOne({ _id: b3._id }, { "job.budgetDay": "2000-01-01" });
+          await processAudio((await claimNext({ _id: b3._id }))!);
+          check("budget: a note charged by an earlier attempt is not charged again", (await AudioUsageModel.findOne({ userId: budgetUser }))?.seconds === used);
+          // one recording longer than the whole budget is allowed on an unused day (never waits forever)
+          await AudioUsageModel.deleteMany({ userId: budgetUser });
+          const huge = await importedNote(400, budgetUser);
+          await processAudio((await claimNext({ _id: huge._id }))!);
+          check("budget: a recording longer than the whole budget still runs on an unused day", (await NoteItemModel.findById(huge._id))?.status === "ready");
+        } finally {
+          env.AUDIO_DAILY_BUDGET_MIN = savedBudget;
+          await NoteItemModel.deleteMany({ userId: budgetUser });
+          await AudioUsageModel.deleteMany({ userId: budgetUser });
+          await deleteUserFiles(budgetUser);
+        }
+
+        // 5) skipped (too long) recordings are never claimed, and the 30-day sweep deletes their audio like any other
+        const skippedKey = await wavKey();
+        const skipped = await NoteItemModel.create({
+          userId: userA,
+          courseId: null,
+          type: "audio",
+          title: "Uzun kayıt",
+          status: "skipped",
+          content: { imported: true, durationSec: 9000, skipReason: "too_long", audioExpiresAt: new Date(Date.now() - 1000), pinned: false, chunks: [{ fileKey: skippedKey, startSec: 0, durationSec: 9000, size: 416, mime: "audio/wav" }] },
+        });
+        check("skipped: never claimed by the worker", (await claimNext({ _id: skipped._id })) === null);
+        await sweepExpiredAudio(mine);
+        const swept = await NoteItemModel.findById(skipped._id);
+        check("skipped: the retention sweep deletes its audio", (swept?.content as { audioDeleted?: boolean }).audioDeleted === true && (await openFile(userA, skippedKey)) === null);
+        gemini.setImportScript(undefined);
       }
 
       // --- 503/500: fallback model, then deferral without using attempts ---

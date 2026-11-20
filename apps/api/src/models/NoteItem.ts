@@ -19,6 +19,10 @@ const jobSchema = new Schema(
     lastError: String,
     // Audio: finished pieces of the transcript by piece index, so a retry only redoes what failed.
     progress: Schema.Types.Mixed,
+    // Audio daily budget: the local day this note's minutes were charged to (so a retry never charges twice),
+    // and "waiting for tomorrow's budget" (shown in the app; does not use up attempts or deferrals).
+    budgetDay: String,
+    budgetDeferred: Boolean,
   },
   { _id: false },
 );

@@ -17,12 +17,33 @@ export interface FakeGemini {
   models: () => string[];
   /** Confidence the fake reports for course suggestions (default 0.9). */
   setSuggestConfidence: (c: number) => void;
+  /**
+   * Imported audio (a request with a fileData part): the fake "recording" is `durationSec` long with one segment
+   * every `everySec`; a response holds at most `perResponse` of them and, when more remain, reports MAX_TOKENS
+   * (with the JSON cut in the middle of a segment when `cutJson`). Continuations ("... noktasından SONRASINDAKİ")
+   * resume after the given time like the real model.
+   */
+  setImportScript: (script: { durationSec: number; everySec?: number; perResponse: number; cutJson?: boolean } | undefined) => void;
+  /** Every imported-audio request so far: where it continued from and the maxOutputTokens it asked for. */
+  importRequests: () => { after: number; maxOutputTokens?: number }[];
+  /** outputTokenLimit that models.get reports (default 65536). */
+  setOutputLimit: (limit: number) => void;
+  /** Files API calls so far, by kind. */
+  filesCalls: () => { upload: number; get: number; delete: number };
 }
 
 interface Params {
-  contents: { parts: { text?: string }[] }[];
-  config?: { responseSchema?: { properties?: Record<string, { enum?: string[] }> } };
+  contents: { parts: { text?: string; fileData?: unknown }[] }[];
+  config?: { responseSchema?: { properties?: Record<string, { enum?: string[] }> }; maxOutputTokens?: number };
 }
+
+const clockOf = (sec: number) => {
+  const h = Math.floor(sec / 3600);
+  const mm = String(Math.floor((sec % 3600) / 60)).padStart(h > 0 ? 2 : 2, "0");
+  const ss = String(sec % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+};
+const clockSeconds = (v: string) => v.split(":").reduce((n, x) => n * 60 + Number(x), 0);
 
 export function setupGemini(): FakeGemini | null {
   if (REAL_GEMINI) {
@@ -37,6 +58,28 @@ export function setupGemini(): FakeGemini | null {
   const failing = new Map<string, number>();
   const used: string[] = [];
   let failAtCall: { call: number; status: number } | undefined;
+  let importScript: { durationSec: number; everySec?: number; perResponse: number; cutJson?: boolean } | undefined;
+  const importReqs: { after: number; maxOutputTokens?: number }[] = [];
+  let outputLimit = 65536;
+  const files = { upload: 0, get: 0, delete: 0 };
+
+  /** One imported-audio request: the segments after the continuation point, cut by perResponse. */
+  const importAnswer = (p: Params): { text: string; finishReason: string } => {
+    const script = importScript ?? { durationSec: 600, perResponse: 1000 };
+    const prompt = p.contents.flatMap((c) => c.parts.map((x) => x.text ?? "")).join(" ");
+    const cont = /(\d+(?::\d\d){1,2}) noktasından SONRASINDAKİ/.exec(prompt)?.[1];
+    const after = cont ? clockSeconds(cont) : -1;
+    importReqs.push({ after, maxOutputTokens: p.config?.maxOutputTokens });
+    const every = script.everySec ?? 30;
+    const all: { start: string; text: string }[] = [];
+    for (let t = 5; t < script.durationSec; t += every) all.push({ start: clockOf(t), text: `Konu ${t}. saniyede anlatıldı.` });
+    const todo = all.filter((s) => clockSeconds(s.start) > after);
+    const part = todo.slice(0, script.perResponse);
+    const more = todo.length > part.length;
+    let text = JSON.stringify({ segments: part });
+    if (more && script.cutJson) text = text.slice(0, text.length - 12); // cut inside the last segment
+    return { text, finishReason: more ? "MAX_TOKENS" : "STOP" };
+  };
 
   const answer = (p: Params): unknown => {
     const props = p.config?.responseSchema?.properties ?? {};
@@ -94,13 +137,27 @@ export function setupGemini(): FakeGemini | null {
           failWith = undefined;
           throw Object.assign(new Error(status === 429 ? "RESOURCE_EXHAUSTED" : "fake failure"), { status });
         }
-        return { text: JSON.stringify(answer(p)) };
+        if (p.contents.some((c) => c.parts.some((x) => x.fileData)) && "segments" in (p.config?.responseSchema?.properties ?? {})) {
+          const r = importAnswer(p);
+          return { text: r.text, candidates: [{ finishReason: r.finishReason }] };
+        }
+        return { text: JSON.stringify(answer(p)), candidates: [{ finishReason: "STOP" }] };
       },
+      get: async () => ({ outputTokenLimit: outputLimit, inputTokenLimit: 1048576 }),
     },
     files: {
-      upload: async () => ({ name: "files/fake", uri: "fake://files/fake", state: "ACTIVE" }),
-      get: async () => ({ name: "files/fake", uri: "fake://files/fake", state: "ACTIVE" }),
-      delete: async () => ({}),
+      upload: async () => {
+        files.upload += 1;
+        return { name: "files/fake", uri: "fake://files/fake", state: "ACTIVE" };
+      },
+      get: async () => {
+        files.get += 1;
+        return { name: "files/fake", uri: "fake://files/fake", state: "ACTIVE" };
+      },
+      delete: async () => {
+        files.delete += 1;
+        return {};
+      },
     },
   };
   setGeminiOverride(fake);
@@ -109,5 +166,14 @@ export function setupGemini(): FakeGemini | null {
     models: () => used,
     failOnCall: (n, status) => (failAtCall = { call: calls + n, status }),
     failModel: (m, s) => (s === undefined ? failing.delete(m) : failing.set(m, s)),
-    failNextWith: (s) => (failWith = s), setSuggestConfidence: (c) => (suggestConfidence = c) };
+    failNextWith: (s) => (failWith = s),
+    setSuggestConfidence: (c) => (suggestConfidence = c),
+    setImportScript: (script) => {
+      importScript = script;
+      importReqs.length = 0;
+    },
+    importRequests: () => importReqs,
+    setOutputLimit: (limit) => (outputLimit = limit),
+    filesCalls: () => ({ ...files }),
+  };
 }

@@ -32,7 +32,11 @@ export async function claimNext(extraFilter: Record<string, unknown> = {}) {
         { status: "processing", "job.leaseUntil": { $lt: now } }, // worker died mid-job
       ],
     },
-    { $set: { status: "processing", "job.leaseUntil": new Date(now.getTime() + LEASE_MS) }, $inc: { "job.attempts": 1 } },
+    {
+      $set: { status: "processing", "job.leaseUntil": new Date(now.getTime() + LEASE_MS) },
+      $inc: { "job.attempts": 1 },
+      $unset: { "job.budgetDeferred": "" },
+    },
     { sort: { createdAt: 1 }, new: true },
   );
 }
@@ -69,6 +73,14 @@ export async function complete(
 export async function saveProgress(note: ClaimedNote, key: string, value: unknown): Promise<void> {
   const leaseUntil = new Date(Date.now() + LEASE_MS);
   const res = await NoteItemModel.updateOne(owned(note), { $set: { ["job.progress." + key]: value, "job.leaseUntil": leaseUntil } });
+  if (res.modifiedCount === 0) throw new LeaseLostError();
+  note.set("job.leaseUntil", leaseUntil);
+}
+
+/** Pushes the lease out before a long step (upload, one big Gemini request). Throws when the lease is already lost. */
+export async function extendLease(note: ClaimedNote): Promise<void> {
+  const leaseUntil = new Date(Date.now() + LEASE_MS);
+  const res = await NoteItemModel.updateOne(owned(note), { $set: { "job.leaseUntil": leaseUntil } });
   if (res.modifiedCount === 0) throw new LeaseLostError();
   note.set("job.leaseUntil", leaseUntil);
 }
@@ -110,6 +122,18 @@ export async function defer(note: ClaimedNote, reason: "quota" | "unavailable" =
   await NoteItemModel.updateOne(owned(note), {
     $set: { status: "pending", "job.lastError": unavailable ? "AI_UNAVAILABLE" : "QUOTA", "job.runAt": new Date(Date.now() + delay) },
     $inc: { "job.attempts": -1, "job.deferrals": 1 },
+    $unset: { "job.leaseUntil": "" },
+  });
+}
+
+/**
+ * The user's daily audio budget is used up: back to pending until `runAt` (the start of their next day).
+ * Unlike defer() this uses up neither an attempt nor a deferral, however many days it waits.
+ */
+export async function deferBudget(note: ClaimedNote, runAt: Date): Promise<void> {
+  await NoteItemModel.updateOne(owned(note), {
+    $set: { status: "pending", "job.runAt": runAt, "job.budgetDeferred": true },
+    $inc: { "job.attempts": -1 },
     $unset: { "job.leaseUntil": "" },
   });
 }

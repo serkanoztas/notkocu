@@ -1,7 +1,8 @@
-import { FileState, Type, type Part, type Schema } from "@google/genai";
+import { Type, type Part, type Schema } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
 import { z } from "zod";
 import { OcrError, toAiError } from "./errors";
+import { uploadToFilesApi } from "./filesApi";
 import { generateContent, geminiTask, getGemini } from "./gemini";
 
 // Scanned PDFs (no usable text layer) go to Gemini as PDF, in chunks of CHUNK_PAGES pages.
@@ -35,21 +36,6 @@ async function splitPdf(src: PDFDocument, from: number, to: number): Promise<Uin
   return part.save();
 }
 
-async function uploadToFilesApi(bytes: Uint8Array): Promise<{ name: string; uri: string }> {
-  const ai = getGemini();
-  const uploaded = await ai.files.upload({
-    file: new Blob([Buffer.from(bytes)], { type: "application/pdf" }),
-    config: { mimeType: "application/pdf" },
-  });
-  let file = uploaded;
-  for (let i = 0; i < 30 && file.state === FileState.PROCESSING; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    file = await ai.files.get({ name: file.name! });
-  }
-  if (!file.name || !file.uri || file.state === FileState.FAILED) throw new OcrError("AI_FILE_UPLOAD");
-  return { name: file.name, uri: file.uri };
-}
-
 /** One chunk -> exactly `count` page texts (padded / merged if the model miscounted). */
 async function ocrChunk(bytes: Uint8Array, count: number, forceFilesApi: boolean): Promise<string[]> {
   const ai = getGemini();
@@ -58,7 +44,7 @@ async function ocrChunk(bytes: Uint8Array, count: number, forceFilesApi: boolean
   try {
     let pdfPart: Part;
     if (forceFilesApi || bytes.length > INLINE_LIMIT_BYTES) {
-      const up = await uploadToFilesApi(bytes);
+      const up = await uploadToFilesApi(bytes, "application/pdf");
       uploadedName = up.name;
       pdfPart = { fileData: { fileUri: up.uri, mimeType: "application/pdf" } };
     } else {

@@ -67,3 +67,30 @@ export function geminiTask(task: GeminiTask = "default") {
   const model = geminiModel(task);
   return { model, thinkingConfig: geminiThinkingConfig(model) };
 }
+
+// Output token limit per model, asked from the API once (models.get -> outputTokenLimit) and cached.
+const FALLBACK_OUTPUT_LIMIT = 8192; // used only when the limit cannot be read
+const outputLimits = new Map<string, number>();
+
+async function outputLimitOf(model: string): Promise<number> {
+  const known = outputLimits.get(model);
+  if (known !== undefined) return known;
+  let limit = FALLBACK_OUTPUT_LIMIT;
+  try {
+    const info = await getGemini().models.get({ model });
+    if (typeof info.outputTokenLimit === "number" && info.outputTokenLimit > 0) limit = info.outputTokenLimit;
+  } catch (err) {
+    console.warn(`Gemini output limit of ${model} unavailable (status ${(err as { status?: number }).status ?? "unknown"}), using ${limit}`);
+  }
+  outputLimits.set(model, limit);
+  return limit;
+}
+
+/**
+ * Highest maxOutputTokens that is valid for the task's model AND its fallback model (a 500/503 retry reuses the
+ * same config), so long answers (a whole lecture transcript) finish in one request whenever the model allows.
+ */
+export async function geminiMaxOutputTokens(task: GeminiTask = "default"): Promise<number> {
+  const models = [geminiModel(task), env.GEMINI_FALLBACK_MODEL].filter((m): m is string => !!m);
+  return Math.min(...(await Promise.all(models.map(outputLimitOf))));
+}

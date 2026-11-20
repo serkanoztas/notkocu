@@ -119,7 +119,7 @@ const chaptersZ = z.object({
   summary: z.string(),
 });
 
-const clock = (sec: number) => {
+export const clock = (sec: number) => {
   const s = Math.max(0, Math.floor(sec));
   const h = Math.floor(s / 3600);
   const mm = String(Math.floor((s % 3600) / 60)).padStart(h > 0 ? 2 : 1, "0");
