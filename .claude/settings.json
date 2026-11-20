@@ -1,5 +1,15 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push*)",
+      "Bash(git log*)"
+    ],
     "deny": [
       "Read(**/.env)",
       "Edit(**/.env)",
