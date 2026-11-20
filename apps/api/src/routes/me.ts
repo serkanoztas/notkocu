@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { MeResponse, StorageUsageResponse } from "@notkocu/shared";
+import { env } from "../config/env";
 import { requireAuth } from "../middleware/requireAuth";
 import { UserModel } from "../models";
 import { deleteUserData } from "../services/account";
@@ -22,7 +23,12 @@ meRouter.get("/", asyncHandler(async (req, res) => {
 
 meRouter.get("/storage", asyncHandler(async (req, res) => {
   const [usedBytes, pinnedAudio] = await Promise.all([getUsage(req.userId), pinnedAudioBytes(req.userId)]);
-  const body: StorageUsageResponse = { usedBytes, limitBytes: storageLimitBytes(), pinnedAudioBytes: pinnedAudio };
+  const body: StorageUsageResponse = {
+    usedBytes,
+    limitBytes: storageLimitBytes(),
+    pinnedAudioBytes: pinnedAudio,
+    limits: { audioMaxProcessMin: env.AUDIO_MAX_PROCESS_MIN },
+  };
   res.json(body);
 }));
 

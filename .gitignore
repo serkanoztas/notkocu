@@ -12,3 +12,5 @@ coverage/
 
 # Personal sample data (contains personal information)
 docs/ornekler/
+
+.scratch/

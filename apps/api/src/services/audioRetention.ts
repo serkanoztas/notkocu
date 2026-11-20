@@ -17,7 +17,7 @@ export async function sweepExpiredAudio(extraFilter: Record<string, unknown> = {
     ...extraFilter,
     type: "audio",
     // Not while the worker may still be reading the pieces.
-    status: { $in: ["ready", "failed"] },
+    status: { $in: ["ready", "failed", "skipped"] },
     "content.audioDeleted": { $ne: true },
     "content.pinned": { $ne: true },
     "content.audioExpiresAt": { $lt: new Date() },

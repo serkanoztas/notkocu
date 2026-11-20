@@ -158,6 +158,8 @@ interface NoteItemBase {
   suggestion?: NoteSuggestion;
   /** Inbox notes: an AI course suggestion is still being prepared. */
   suggesting?: boolean;
+  /** Audio waiting for the next day's processing budget ("Sırada, yarın işlenecek"). */
+  budgetDeferred?: boolean;
   status: NoteStatus;
   source: NoteSource;
   tags: string[];
@@ -259,6 +261,10 @@ export interface StorageUsageResponse {
   limitBytes: number;
   /** Part of usedBytes: recordings kept with "Kalıcı yap". */
   pinnedAudioBytes: number;
+  limits: {
+    /** Recordings longer than this many minutes are kept but not transcribed (AUDIO_MAX_PROCESS_MIN). */
+    audioMaxProcessMin: number;
+  };
 }
 
 export interface HealthResponse {

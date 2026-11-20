@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import multer from "multer";
 import { z } from "zod";
 import {
+  AUDIO_IMPORT_MAX_BYTES,
   AUDIO_MAX_CHUNKS,
   AUDIO_MAX_CHUNK_BYTES,
   AUDIO_MAX_TOTAL_BYTES,
@@ -15,7 +16,9 @@ import { requireAuth } from "../middleware/requireAuth";
 import { NoteItemModel } from "../models";
 import { assertWithinLimit, deleteFiles, saveFile } from "../services/files";
 import { unpinDeadline } from "../services/audioRetention";
-import { estimateDurationSec, sniffAudio } from "../services/audioSniff";
+import { env } from "../config/env";
+import { readAudioDuration } from "../services/audioDuration";
+import { estimateDurationSec, isAmr, sniffAudio, sniffImportedAudio } from "../services/audioSniff";
 import { sniffDocument } from "../services/documents/sniff";
 import { DOCUMENT_MIME } from "../services/documents/types";
 import { processImage, sniffImageMime } from "../services/imageProcess";
@@ -25,6 +28,7 @@ import {
   assertId,
   assertManualTarget,
   autoAssign,
+  importPlacement,
   markWeeksStale,
   serializeNote,
   titleFromMarkdown,
@@ -49,19 +53,33 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_UPLOAD_BYTES, files: AUDIO_MAX_CHUNKS },
 });
+// An imported audio file (POST /api/notes?import=1) is a single, much larger file.
+const uploadImport = multer({ storage: multer.memoryStorage(), limits: { fileSize: AUDIO_IMPORT_MAX_BYTES, files: 1 } });
+
+/** `?import=1`: an external audio file (picked or shared) instead of a recording made in the app. */
+const isImportRequest = (req: { query: { import?: unknown } }) => req.query.import === "1";
 
 /** Multipart bodies carry a photo, a document or the pieces of a recording; JSON bodies pass through untouched. */
 const receiveUpload: RequestHandler = (req, res, next) => {
   if (!req.is("multipart/form-data")) return next();
+  const imported = isImportRequest(req);
   // Everything is held in memory: refuse an oversized body before reading it (a recording is the largest).
-  if (Number(req.headers["content-length"] ?? 0) > AUDIO_MAX_TOTAL_BYTES + 1024 * 1024) {
-    return next(new AppError(413, "Yükleme çok büyük", "FILE_TOO_LARGE"));
+  const cap = imported ? AUDIO_IMPORT_MAX_BYTES : AUDIO_MAX_TOTAL_BYTES;
+  if (Number(req.headers["content-length"] ?? 0) > cap + 1024 * 1024) {
+    return next(
+      imported
+        ? new AppError(413, "Ses dosyası en fazla 100 MB olabilir", "AUDIO_TOO_LARGE")
+        : new AppError(413, "Yükleme çok büyük", "FILE_TOO_LARGE"),
+    );
   }
-  upload.array("file", AUDIO_MAX_CHUNKS)(req, res, (err: unknown) => {
+  const take = imported ? uploadImport.array("file", 1) : upload.array("file", AUDIO_MAX_CHUNKS);
+  take(req, res, (err: unknown) => {
     if (err instanceof multer.MulterError) {
       return next(
         err.code === "LIMIT_FILE_SIZE"
-          ? new AppError(413, "Dosya en fazla 20 MB olabilir", "FILE_TOO_LARGE")
+          ? imported
+            ? new AppError(413, "Ses dosyası en fazla 100 MB olabilir", "AUDIO_TOO_LARGE")
+            : new AppError(413, "Dosya en fazla 20 MB olabilir", "FILE_TOO_LARGE")
           : new AppError(400, "Geçersiz yükleme", "INVALID_UPLOAD"),
       );
     }
@@ -84,7 +102,7 @@ const uploadLimiter = rateLimit({
 const metaFields = {
   clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
   capturedAt: z.string().datetime({ offset: true }).optional(),
-  source: z.enum(["app", "share-intent"]).optional(),
+  source: z.enum(["app", "share-intent", "import"]).optional(),
 };
 
 // Multipart has no null, so "inbox" is its own flag; fields arrive as strings.
@@ -97,6 +115,8 @@ const uploadForm = z.object({
   courseId: objectIdLike.optional(),
   weekNo: z.coerce.number().int().min(1).max(60).optional(),
   inbox: z.enum(["1", "true"]).optional(),
+  // Imported audio: the session of that lesson when the course has several that week.
+  sessionId: objectIdLike.optional(),
 });
 
 const targetFields = {
@@ -160,7 +180,7 @@ async function resolveTarget(
   return { courseId: want.courseId, weekNo: want.weekNo };
 }
 
-type Meta = { clientId?: string; capturedAt?: string; source?: "app" | "share-intent" };
+type Meta = { clientId?: string; capturedAt?: string; source?: "app" | "share-intent" | "import" };
 
 /** Moment the note was taken (never in the future) and the fields every created note carries. */
 function metaOf(m: Meta) {
@@ -199,12 +219,34 @@ function cleanFileName(raw: string): string {
 const existingNote = (userId: string, clientId?: string) =>
   clientId ? NoteItemModel.findOne({ userId, clientId }) : Promise.resolve(null);
 
-async function createUploadNote(userId: string, raw: unknown, files: Express.Multer.File[]) {
+async function createUploadNote(userId: string, raw: unknown, files: Express.Multer.File[], imported = false) {
   if (files.length === 0) throw new AppError(400, "Dosya gerekli", "FILE_REQUIRED");
   const form = uploadForm.parse(raw);
   if (form.type !== "audio" && files.length !== 1) throw new AppError(400, "Tek dosya gerekli", "INVALID_UPLOAD");
+  if (imported && form.type !== "audio") throw new AppError(400, "İçe aktarma yalnızca ses için", "INVALID_UPLOAD");
   const known = await existingNote(userId, form.clientId); // before any processing or storage
   if (known) return { note: known, created: false };
+
+  if (imported) {
+    // No auto-assignment here: inbox unless the user picked a course + week (then it is dated by that lesson).
+    const place = await importPlacement(userId, {
+      courseId: form.inbox ? null : form.courseId,
+      weekNo: form.weekNo,
+      sessionId: form.sessionId,
+    });
+    const { stamp } = metaOf({
+      ...form,
+      source: form.source ?? "import",
+      capturedAt: place.capturedAt?.toISOString() ?? form.capturedAt,
+    });
+    try {
+      return { note: await createImportedAudioNote(userId, form, place.target, files[0]!, stamp), created: true };
+    } catch (err) {
+      const winner = isDuplicateKey(err) ? await existingNote(userId, form.clientId) : null;
+      if (winner) return { note: winner, created: false };
+      throw err;
+    }
+  }
 
   const { when, stamp } = metaOf(form);
   const target = await resolveTarget(userId, { courseId: form.inbox ? null : form.courseId, weekNo: form.weekNo }, when);
@@ -292,6 +334,55 @@ async function createDocumentNote(
   }
 }
 
+/** Over AUDIO_MAX_PROCESS_MIN a recording is stored and playable but never sent to Gemini. */
+const isTooLongToProcess = (durationSec: number) => durationSec > env.AUDIO_MAX_PROCESS_MIN * 60;
+
+/** One external audio file = one piece covering the whole recording (so the player and the global timeline stay as is). */
+async function createImportedAudioNote(
+  userId: string,
+  form: z.infer<typeof uploadForm>,
+  target: Target,
+  file: Express.Multer.File,
+  stamp: ReturnType<typeof metaOf>["stamp"],
+) {
+  if (isAmr(file.buffer)) {
+    throw new AppError(400, "AMR biçimi desteklenmiyor. Ses dosyasını m4a, mp3 ya da ogg olarak ekle.", "UNSUPPORTED_AUDIO_TYPE");
+  }
+  const kind = sniffImportedAudio(file.buffer);
+  if (!kind) {
+    throw new AppError(400, "Desteklenmeyen ses biçimi (m4a, mp3, wav, ogg/opus, flac, aac desteklenir)", "UNSUPPORTED_AUDIO_TYPE");
+  }
+  const read = await readAudioDuration(file.buffer, kind.mime);
+  if (read === null) throw new AppError(400, "Ses dosyasının süresi okunamadı", "UNREADABLE_AUDIO");
+  const durationSec = Math.max(1, Math.round(read));
+
+  await assertWithinLimit(userId, file.buffer.length);
+  const fileKey = await saveFile(userId, file.buffer, { mime: kind.mime, filename: "audio-0." + kind.ext });
+  try {
+    const tooLong = isTooLongToProcess(durationSec);
+    const chunk: AudioChunk = { fileKey, startSec: 0, durationSec, size: file.buffer.length, mime: kind.mime };
+    return await NoteItemModel.create({
+      userId,
+      ...placement(target),
+      type: "audio",
+      title: form.title || "İçe aktarılan ses",
+      content: {
+        chunks: [chunk],
+        durationSec,
+        audioExpiresAt: new Date(Date.now() + AUDIO_RETENTION_DAYS * 24 * 3600 * 1000),
+        pinned: false,
+        imported: true,
+        ...(tooLong ? { skipReason: "too_long" } : {}),
+      },
+      status: tooLong ? "skipped" : "pending",
+      ...stamp,
+    });
+  } catch (err) {
+    await deleteFiles(userId, [fileKey]);
+    throw err;
+  }
+}
+
 /** Pieces of one recording: separate GridFS files, timed on one global timeline, transcribed by the worker. */
 async function createAudioNote(
   userId: string,
@@ -335,6 +426,7 @@ async function createAudioNote(
       chunks.push({ fileKey, startSec: starts[i]!, durationSec: durations[i]!, size: f.buffer.length, mime: kind.mime });
     }
     const durationSec = durations.reduce((a, b) => a + b, 0);
+    const tooLong = isTooLongToProcess(durationSec);
     return await NoteItemModel.create({
       userId,
       ...placement(target),
@@ -345,8 +437,9 @@ async function createAudioNote(
         durationSec,
         audioExpiresAt: new Date(Date.now() + AUDIO_RETENTION_DAYS * 24 * 3600 * 1000),
         pinned: false,
+        ...(tooLong ? { skipReason: "too_long" } : {}),
       },
-      status: "pending", // the worker transcribes it
+      status: tooLong ? "skipped" : "pending", // pending: the worker transcribes it; skipped: kept and playable only
       ...stamp,
     });
   } catch (err) {
@@ -363,7 +456,12 @@ notesRouter.post(
     const userId = req.userId;
 
     if (req.is("multipart/form-data")) {
-      const { note, created } = await createUploadNote(userId, req.body, (req.files as Express.Multer.File[] | undefined) ?? []);
+      const { note, created } = await createUploadNote(
+        userId,
+        req.body,
+        (req.files as Express.Multer.File[] | undefined) ?? [],
+        isImportRequest(req),
+      );
       if (created) await markWeeksStale(userId, [note]);
       const out: NoteResponse = { note: serializeNote(note.toJSON()) };
       res.status(created ? 201 : 200).json(out);
@@ -496,6 +594,9 @@ notesRouter.post(
   "/:id/retry",
   asyncHandler(async (req, res) => {
     const note = await findOwnNote(req.userId, req.params.id);
+    if (note.status === "skipped") {
+      throw new AppError(409, "Bu kayıt çok uzun olduğu için otomatik işlenmedi", "NOT_FAILED");
+    }
     if (!(await requeue(req.userId, String(note._id)))) {
       throw new AppError(409, "Yalnızca başarısız notlar yeniden denenebilir", "NOT_FAILED");
     }

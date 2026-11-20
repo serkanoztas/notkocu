@@ -10,7 +10,7 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 import { createApp } from "../src/app";
 import { env } from "../src/config/env";
-import { dayIndex, minutesOfDay, semesterWeekNo } from "@notkocu/shared";
+import { dayIndex, minutesOfDay, semesterWeekNo, sessionDateTime } from "@notkocu/shared";
 import { CourseModel, NoteItemModel, SemesterModel, SessionModel, WeekSummaryModel } from "../src/models";
 import { ocrPdfPages } from "../src/services/ai/documentOcr";
 import { deleteUserFiles, getUsage } from "../src/services/files";
@@ -33,7 +33,9 @@ const userB = new mongoose.Types.ObjectId().toHexString();
 
 /** Removes everything this script created. Also runs when the script is interrupted or timed out. */
 async function cleanup() {
+  console.log("cleanup: stopping the worker");
   await worker?.stop();
+  console.log("cleanup: worker stopped, removing data");
   await NoteItemModel.deleteMany({ userId: { $in: [userA, userB] } });
   await CourseModel.deleteMany({ userId: { $in: [userA, userB] } });
   await SessionModel.deleteMany({ userId: { $in: [userA, userB] } });
@@ -425,6 +427,93 @@ async function main() {
     check("a capturedAt in the future is clamped to now", Math.abs(+new Date(future.createdAt) - Date.now()) < 60_000);
     res = await jsonPost(tokenA, { type: "text", markdown: "x", courseId: null, clientId: "short" });
     check("malformed clientId rejected 400", res.status === 400);
+
+    // --- audio import (POST /api/notes?import=1): one external file = one piece covering the whole recording ---
+    // Tiny files on purpose: reading from GridFS can be very slow on the shared Atlas cluster (~15 KB/s measured),
+    // and the in-process worker reads every pending note. Only the one 9 MB case below is big, and it is never queued.
+    const wav = (seconds: number, rate = 1000) => {
+      const n = rate * seconds;
+      const b = Buffer.alloc(44 + n, 128); // 8-bit mono silence
+      b.write("RIFF", 0); b.writeUInt32LE(36 + n, 4); b.write("WAVEfmt ", 8); b.writeUInt32LE(16, 16);
+      b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate, 28);
+      b.writeUInt16LE(1, 32); b.writeUInt16LE(8, 34); b.write("data", 36); b.writeUInt32LE(n, 40);
+      return b;
+    };
+    type ImportedNote = { _id: string; status: string; source: string; courseId: string | null; weekNo?: number; sessionId?: string; capturedAt?: string; content: { imported?: boolean; skipReason?: string; durationSec: number; chunks: { fileKey: string; startSec: number; durationSec: number; mime: string }[] } };
+    const importPost = (fields: Record<string, string>, file: Buffer, name = "ses.wav") => {
+      const f = new FormData();
+      for (const [k, v] of Object.entries(fields)) f.append(k, v);
+      f.append("file", new Blob([file]), name);
+      return fetch(base + "/api/notes?import=1", { method: "POST", headers: auth(tokenA), body: f });
+    };
+
+    res = await importPost({ type: "audio", clientId: "import-check-0001" }, wav(5));
+    const imp = ((await res.json()) as { note: ImportedNote }).note;
+    check("import wav -> 201, inbox, source import, imported flag", res.status === 201 && imp.courseId === null && imp.source === "import" && imp.content.imported === true, JSON.stringify({ s: res.status, c: imp.courseId, src: imp.source }));
+    check("import: ONE piece = the whole recording, duration read from the file", imp.content.chunks.length === 1 && imp.content.chunks[0]!.startSec === 0 && imp.content.durationSec === 5 && imp.content.chunks[0]!.durationSec === 5 && imp.content.chunks[0]!.mime === "audio/wav");
+    check("import: no auto-assignment, capturedAt = import moment", !imp.sessionId && Math.abs(+new Date(imp.capturedAt ?? 0) - Date.now()) < 60_000 || imp.capturedAt === undefined);
+    res = await fetch(base + "/api/files/" + imp.content.chunks[0]!.fileKey, { headers: auth(tokenA) });
+    check("import: the file streams back as audio/wav", res.status === 200 && res.headers.get("content-type") === "audio/wav");
+    res = await importPost({ type: "audio", clientId: "import-check-0001" }, wav(5));
+    check("import: same clientId -> 200, same note", res.status === 200 && ((await res.json()) as { note: ImportedNote }).note._id === imp._id);
+
+    // ~9 MB: over a recording piece limit (8 MB), fine for an import. With the processing limit lowered the note is
+    // `skipped`, so the worker never reads it (a 9 MB read would take minutes on a slow link).
+    const keepLimit = env.AUDIO_MAX_PROCESS_MIN;
+    env.AUDIO_MAX_PROCESS_MIN = 1;
+    res = await importPost({ type: "audio" }, wav(1125, 8000));
+    env.AUDIO_MAX_PROCESS_MIN = keepLimit;
+    const big = ((await res.json()) as { note: ImportedNote }).note;
+    check("import: a 9 MB file is accepted (separate, larger limit)", res.status === 201 && big.content.durationSec === 1125 && big.status === "skipped");
+    res = await importPost({ type: "audio" }, Buffer.concat([Buffer.from("#!AMR\n"), Buffer.alloc(200)]), "ses.amr");
+    const amr = (await res.json()) as { error?: { code?: string; message?: string }; code?: string; message?: string };
+    check("import: AMR rejected with its own message", res.status === 400 && JSON.stringify(amr).includes("AMR"), JSON.stringify(amr));
+    res = await importPost({ type: "audio" }, Buffer.from("this is only some text pretending to be audio"), "ses.mp3");
+    check("import: fake audio (magic bytes) rejected 400", res.status === 400);
+    res = await importPost({ type: "audio" }, Buffer.concat([Buffer.from("OggS"), Buffer.alloc(300, 1)]), "ses.opus");
+    check("import: Ogg with an unreadable length -> 400 UNREADABLE_AUDIO", res.status === 400 && JSON.stringify(await res.json()).includes("UNREADABLE_AUDIO"));
+    res = await importPost({ type: "image" }, wav(1));
+    check("import: only for audio", res.status === 400);
+
+    // course + week: dated by the lesson. One session -> automatic; several -> the user picks.
+    const impCourse = await CourseModel.create({ userId: userA, semesterId: semester._id, code: "IMP-101", name: "İçe Aktarma Testi" });
+    const impSession = await SessionModel.create({ userId: userA, courseId: impCourse._id, day: 0, start: "03:00", end: "03:50", kind: "teori" });
+    res = await importPost({ type: "audio", courseId: String(impCourse._id), weekNo: "1" }, wav(3));
+    const placed = ((await res.json()) as { note: ImportedNote }).note;
+    const wantAt = Math.min(+sessionDateTime({ startDate: monday.toISOString() }, { day: 0, start: "03:00", end: "03:50" }, 1, "Europe/Istanbul"), Date.now());
+    check("import + course/week (single session): session picked automatically and capturedAt = lesson time", res.status === 201 && placed.sessionId === String(impSession._id) && placed.weekNo === 1 && Math.abs(+new Date(placed.capturedAt ?? 0) - wantAt) < 1000, JSON.stringify({ s: res.status, at: placed.capturedAt, want: new Date(wantAt).toISOString() }));
+    await SessionModel.create({ userId: userA, courseId: impCourse._id, day: 2, start: "03:00", end: "03:50", kind: "lab" });
+    res = await importPost({ type: "audio", courseId: String(impCourse._id), weekNo: "1" }, wav(3));
+    check("import + course with several sessions: session required -> 400", res.status === 400 && JSON.stringify(await res.json()).includes("SESSION_REQUIRED"));
+    res = await importPost({ type: "audio", courseId: String(impCourse._id), weekNo: "1", sessionId: String(new mongoose.Types.ObjectId()) }, wav(3));
+    check("import: a session of another course -> 400", res.status === 400);
+    const lab = (await SessionModel.findOne({ courseId: impCourse._id, kind: "lab" }))!;
+    res = await importPost({ type: "audio", courseId: String(impCourse._id), weekNo: "1", sessionId: String(lab._id) }, wav(3));
+    const picked = ((await res.json()) as { note: ImportedNote }).note;
+    const labAt = Math.min(+sessionDateTime({ startDate: monday.toISOString() }, { day: 2, start: "03:00", end: "03:50" }, 1, "Europe/Istanbul"), Date.now());
+    check("import: the chosen session dates the note", res.status === 201 && picked.sessionId === String(lab._id) && Math.abs(+new Date(picked.capturedAt ?? 0) - labAt) < 1000);
+
+    // quota guard: a recording over AUDIO_MAX_PROCESS_MIN is stored and playable but never queued
+    const maxMin = env.AUDIO_MAX_PROCESS_MIN;
+    env.AUDIO_MAX_PROCESS_MIN = 1;
+    try {
+      res = await importPost({ type: "audio", clientId: "import-check-long1" }, wav(90));
+      const longImp = ((await res.json()) as { note: ImportedNote }).note;
+      check("import over the limit -> skipped (too_long), file kept", res.status === 201 && longImp.status === "skipped" && longImp.content.skipReason === "too_long");
+      res = await fetch(base + "/api/files/" + longImp.content.chunks[0]!.fileKey, { headers: auth(tokenA) });
+      check("a skipped recording is still playable", res.status === 200);
+      res = await fetch(base + "/api/notes", { method: "POST", headers: auth(tokenA), body: audioForm([adts(5000)], { type: "audio", inbox: "1", chunkDurations: "[90]", clientId: "audio-check-long2" }) });
+      const longRec = ((await res.json()) as { note: ImportedNote }).note;
+      check("live recording over the limit -> skipped too", res.status === 201 && longRec.status === "skipped");
+      await sleep(2500);
+      check("a skipped note is never claimed by the worker", (await NoteItemModel.findById(longImp._id))?.status === "skipped" && (await NoteItemModel.findById(longRec._id))?.status === "skipped");
+      res = await fetch(base + "/api/notes/" + longRec._id + "/retry", { method: "POST", headers: auth(tokenA) });
+      check("retry of a skipped note -> 409", res.status === 409);
+    } finally {
+      env.AUDIO_MAX_PROCESS_MIN = maxMin;
+    }
+    res = await fetch(base + "/api/me/storage", { headers: auth(tokenA) });
+    check("storage reports the audio processing limit", ((await res.json()) as { limits?: { audioMaxProcessMin?: number } }).limits?.audioMaxProcessMin === maxMin);
 
     // Large-file path: same PDF through the Files API (and deleted at the provider afterwards).
     const viaFilesApi = await ocrPdfPages(scannedPdf, { forceFilesApi: true });

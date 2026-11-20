@@ -27,6 +27,9 @@ Bir işe başlamadan önce ilgili bölümü oku:
 - Uzun işler (OCR, ses, özet) asla istek içinde yapılmaz; kuyruğa atılır, not `pending` → `processing` → `ready | failed` durumlarından geçer.
 - Sırlar `.env` dosyasında tutulur, repoya girmez. `.env.example` güncel tutulur.
 - `.env` dosyaları ve `docs/ornekler` okunmaz; yeni env değişkeni gerekiyorsa `.env.example`'a ekle ve bana söyle.
+- Proje dışındaki dosyalar okunmaz, yazılmaz, listelenmez. Yardımcı script'ler ve test çıktıları proje içindeki `.scratch/` klasörüne (`.gitignore`'da) yazılır, iş bitince içi temizlenir.
+- Dosya oluşturmak ve düzenlemek için yalnızca Write/Edit araçları kullanılır; Bash ile heredoc (`cat > ... <<EOF`), `sed`, `awk`, `echo >>` ile dosya yazılmaz.
+- Bash yalnızca basit, tek komutlar için kullanılır: `npm run ...`, `npx tsc --noEmit`, `git status/diff/add/commit/push`, `node .scratch/x.cjs`. Alt kabuk `( ... )`, `$?`, `$(...)`, değişken, uzun `&&` zinciri ve `|` ile filtreleme kullanılmaz; çıktı uzunsa olduğu gibi okunur. Test çıktısını dosyaya kaydetmek gerekirse script'in kendisi yazar.
 - Web yalnızca geliştirme sırasında hızlı önizleme içindir. Web'e özel kod, ekran ya da düzeltme yazılmaz; bir özellik webde çalışmıyorsa sorun sayılmaz. Her aşama Android cihazda test edilir.
 
 ## Tasarım
