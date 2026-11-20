@@ -1,4 +1,4 @@
-import { AUDIO_MAX_TOTAL_BYTES } from "@notkocu/shared";
+import { AUDIO_IMPORT_MAX_BYTES, AUDIO_MAX_TOTAL_BYTES } from "@notkocu/shared";
 import { Directory, File, Paths } from "expo-file-system";
 import { api, ApiError } from "./api";
 
@@ -16,6 +16,8 @@ export interface OutboxTarget {
   /** null = inbox */
   courseId: string | null;
   weekNo?: number;
+  /** Imported audio: the session of that lesson, when the course has several. */
+  sessionId?: string;
 }
 
 export interface OutboxEntry {
@@ -24,7 +26,9 @@ export interface OutboxEntry {
   kind: OutboxKind;
   /** ISO time the note was taken; the target and the note's date follow it, not the time it is sent. */
   capturedAt: string;
-  source: "app" | "share-intent";
+  source: "app" | "share-intent" | "import";
+  /** Audio: an external file (one file, not recorded here); sent to the import endpoint. */
+  imported?: boolean;
   target?: OutboxTarget;
   title?: string;
   markdown?: string;
@@ -120,6 +124,14 @@ export async function sendEntry(entry: OutboxEntry): Promise<void> {
   const meta = { clientId: entry.clientId, capturedAt: entry.capturedAt, source: entry.source };
   const target = entry.target;
 
+  if (entry.kind === "audio" && entry.imported) {
+    if (!entry.fileName) throw new ApiError("Dosya bulunamadı", 400, "FILE_REQUIRED");
+    const file = new File(entryDir(entry.clientId), entry.fileName);
+    if (!file.exists) throw new ApiError("Dosya bulunamadı", 400, "FILE_REQUIRED");
+    if (file.size > AUDIO_IMPORT_MAX_BYTES) throw new ApiError("Ses dosyası çok büyük", 413, "AUDIO_TOO_LARGE");
+    await api.importAudioNote(file.uri, { ...target }, meta, entry.title);
+    return;
+  }
   if (entry.kind === "audio") {
     const dir = entryDir(entry.clientId);
     const pieces = (entry.chunks ?? []).map((c) => ({ file: new File(dir, c.fileName), durationSec: c.durationSec }));
@@ -154,9 +166,14 @@ export function errorMessage(err: ApiError): string {
     case "UNSUPPORTED_IMAGE_TYPE":
       return "Dosya türü desteklenmiyor";
     case "AUDIO_TOO_LARGE":
-      return "Kayıt çok büyük (en fazla 60 MB)";
+      return "Ses çok büyük (kayıt en fazla 60 MB, içe aktarılan dosya en fazla 100 MB)";
     case "UNSUPPORTED_AUDIO_TYPE":
-      return "Ses biçimi desteklenmiyor";
+      return "Ses biçimi desteklenmiyor (m4a, mp3, wav, ogg/opus, flac, aac)";
+    case "UNREADABLE_AUDIO":
+      return "Ses dosyasının süresi okunamadı";
+    case "SESSION_REQUIRED":
+    case "INVALID_SESSION":
+      return "Dersin oturumu seçilmeli";
     case "FILE_REQUIRED":
       return "Dosya bulunamadı";
     default:

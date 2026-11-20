@@ -13,7 +13,7 @@ function preview(e: OutboxEntry): string {
   if (e.title) return e.title;
   if (e.kind === "text") return (e.markdown ?? "").split("\n").find((l) => l.trim())?.slice(0, 80) ?? "Not";
   if (e.kind === "link") return e.url ?? "Bağlantı";
-  if (e.kind === "audio") return "Ders kaydı";
+  if (e.kind === "audio") return e.imported ? (e.displayName ?? "İçe aktarılan ses") : "Ders kaydı";
   return e.displayName ?? (e.kind === "image" ? "Fotoğraf" : "Belge");
 }
 

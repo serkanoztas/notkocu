@@ -28,6 +28,7 @@ function errorText(e: unknown): string {
 /** Where the note came from, as shown on the card. */
 function sourceLabel(n: NoteItem): string {
   if (n.source === "share-intent") return "Paylaşımdan";
+  if (n.source === "import") return "İçe aktarıldı";
   return { text: "Hızlı not", image: "Fotoğraf", document: "Dosya", link: "Bağlantı", audio: "Ses", task: "Görev", code: "Kod" }[n.type];
 }
 
@@ -208,7 +209,8 @@ interface CardProps {
 }
 
 function InboxCard({ note, timeZone, courses, suggestedCourse, week, busy, onOpen, onApprove, onPick, onChip }: CardProps) {
-  const processing = note.status === "pending" || note.status === "processing";
+  const waitingForTomorrow = note.status === "pending" && note.budgetDeferred === true;
+  const processing = !waitingForTomorrow && (note.status === "pending" || note.status === "processing");
   const failed = note.status === "failed";
 
   const preview =
@@ -239,8 +241,12 @@ function InboxCard({ note, timeZone, courses, suggestedCourse, week, busy, onOpe
             <Text numberOfLines={1} className="font-body-semibold text-lg text-ink">
               {note.title || "Adsız not"}
             </Text>
-            {processing ? (
+            {waitingForTomorrow ? (
+              <Text className="font-body text-base text-muted">Sırada, yarın işlenecek</Text>
+            ) : processing ? (
               <Text className="font-body text-base text-muted">İşleniyor…</Text>
+            ) : note.status === "skipped" ? (
+              <Text className="font-body text-base text-muted">Otomatik işlenmedi (çok uzun kayıt)</Text>
             ) : failed ? (
               <Text className="font-body text-base text-red-700">İşlenemedi</Text>
             ) : preview ? (
@@ -278,7 +284,7 @@ function InboxCard({ note, timeZone, courses, suggestedCourse, week, busy, onOpe
             <Text className="font-body-semibold text-base text-white">Onayla</Text>
           </Pressable>
         </View>
-      ) : processing || failed ? (
+      ) : waitingForTomorrow || processing || failed || note.status === "skipped" ? (
         <Pressable
           onPress={onPick}
           disabled={busy}

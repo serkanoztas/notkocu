@@ -25,8 +25,12 @@ export function NoteRow({ note, divider }: { note: NoteItem; divider?: boolean }
         <Text numberOfLines={1} className="font-body-medium text-base text-ink">
           {note.title || "Adsız not"}
         </Text>
-        {note.status === "pending" || note.status === "processing" ? (
+        {note.status === "pending" && note.budgetDeferred ? (
+          <Text className="font-body text-sm text-muted">Sırada, yarın işlenecek</Text>
+        ) : note.status === "pending" || note.status === "processing" ? (
           <Text className="font-body text-sm text-muted">İşleniyor…</Text>
+        ) : note.status === "skipped" ? (
+          <Text className="font-body text-sm text-muted">Otomatik işlenmedi</Text>
         ) : note.status === "failed" ? (
           <Text className="font-body text-sm text-red-700">İşlenemedi</Text>
         ) : note.type === "audio" ? (

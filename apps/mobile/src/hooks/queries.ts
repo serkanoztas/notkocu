@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { NoteItem, UpdateNoteRequest } from "@notkocu/shared";
+import { AUDIO_MAX_PROCESS_MIN_DEFAULT, type NoteItem, type UpdateNoteRequest } from "@notkocu/shared";
 import { api } from "../lib/api";
 
 /** Notes still being processed by the worker: the screen polls every few seconds until none are left. */
 const POLL_MS = 4000;
 const isActive = (notes: NoteItem[] | undefined) =>
-  !!notes?.some((n) => n.status === "pending" || n.status === "processing" || n.suggesting);
+  // A note waiting for tomorrow's audio budget will not change soon: no need to poll for it.
+  !!notes?.some((n) => ((n.status === "pending" && !n.budgetDeferred) || n.status === "processing") || n.suggesting);
 
 export const useToday = () => useQuery({ queryKey: ["today"], queryFn: api.today });
 
@@ -46,6 +47,12 @@ export const useNote = (id: string) =>
   });
 
 export const useStorage = () => useQuery({ queryKey: ["storage"], queryFn: api.storage });
+
+/** Longest recording (minutes) the server transcribes (AUDIO_MAX_PROCESS_MIN); the default until it is known. */
+export function useAudioLimitMin(): number {
+  const q = useStorage();
+  return q.data?.limits?.audioMaxProcessMin ?? AUDIO_MAX_PROCESS_MIN_DEFAULT;
+}
 
 /** A note changed: every list that can contain it is stale (counts, week lists, inbox, today). */
 export function invalidateNoteViews(queryClient: QueryClient): Promise<unknown> {

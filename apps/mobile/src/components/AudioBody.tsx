@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { NoteItem } from "@notkocu/shared";
+import { useAudioLimitMin } from "../hooks/queries";
 import { useChunkPlayer } from "../lib/chunkPlayer";
 import { formatDuration } from "../lib/format";
 
@@ -43,6 +44,8 @@ export function AudioBody({ note, onRetry, retrying, onPin, pinning }: Props) {
   const activeLine = activeIndex(transcript, player.position);
   const activeChapter = activeIndex(chapters, player.position);
   const processing = note.status === "pending" || note.status === "processing";
+  const waitingForTomorrow = note.status === "pending" && note.budgetDeferred === true;
+  const skipLimitMin = useAudioLimitMin();
 
   const expires = content.audioExpiresAt ? new Date(content.audioExpiresAt).getTime() : null;
   const daysLeft = expires === null ? null : Math.max(0, Math.ceil((expires - Date.now()) / DAY_MS));
@@ -157,9 +160,21 @@ export function AudioBody({ note, onRetry, retrying, onPin, pinning }: Props) {
         ) : null}
       </View>
 
-      {processing ? (
+      {waitingForTomorrow ? (
+        <View className="rounded-2xl border border-line bg-card p-4">
+          <Text className="font-body-semibold text-base text-ink">Sırada, yarın işlenecek</Text>
+          <Text className="mt-1 font-body text-base text-muted">Bugünkü yazıya çevirme hakkın doldu. Bu kayıt yarın kendiliğinden yazıya çevrilir; bu sırada dinleyebilirsin.</Text>
+        </View>
+      ) : processing ? (
         <View className="rounded-2xl border border-line bg-card p-4">
           <Text className="font-body text-base text-muted">Yazıya çevriliyor… Uzun kayıtlar birkaç dakika sürebilir; bu sırada kaydı dinleyebilirsin.</Text>
+        </View>
+      ) : note.status === "skipped" ? (
+        <View className="rounded-2xl border border-line bg-card p-4">
+          <Text className="font-body-semibold text-base text-ink">Otomatik işlenmedi</Text>
+          <Text className="mt-1 font-body text-base text-muted">
+            Bu kayıt {skipLimitMin} dk'dan uzun, otomatik işlenmedi. Önemli kısmını kırpıp tekrar yükleyebilirsin.
+          </Text>
         </View>
       ) : note.status === "failed" ? (
         <View className="rounded-2xl border border-red-200 bg-card p-4">

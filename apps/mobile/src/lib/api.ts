@@ -125,12 +125,14 @@ async function request<T>(path: string, opts: Options = {}): Promise<T> {
 export interface PhotoTarget {
   courseId?: string | null;
   weekNo?: number;
+  /** Imported audio: which session of the course (needed when the course has several). */
+  sessionId?: string;
 }
 
 export interface UploadMeta {
   clientId: string;
   capturedAt: string;
-  source: "app" | "share-intent";
+  source: "app" | "share-intent" | "import";
 }
 
 /** Authorization header for image requests (RN <Image> cannot go through request()). */
@@ -188,6 +190,23 @@ export const api = {
     }
     for (const uri of fileUris) form.append("file", new File(uri) as unknown as Blob);
     return request<NoteResponse>("/api/notes", { method: "POST", form, timeoutMs: 600000 });
+  },
+  /** An external audio file (picked or shared): one file, the server reads its length and dates it by the chosen lesson. */
+  importAudioNote: (fileUri: string, target: PhotoTarget, meta: UploadMeta, title?: string) => {
+    const form = new FormData();
+    form.append("type", "audio");
+    form.append("clientId", meta.clientId);
+    form.append("capturedAt", meta.capturedAt);
+    form.append("source", meta.source);
+    if (title) form.append("title", title);
+    if (target.courseId === null) form.append("inbox", "1");
+    else if (target.courseId) {
+      form.append("courseId", target.courseId);
+      if (target.weekNo) form.append("weekNo", String(target.weekNo));
+      if (target.sessionId) form.append("sessionId", target.sessionId);
+    }
+    form.append("file", new File(fileUri) as unknown as Blob);
+    return request<NoteResponse>("/api/notes?import=1", { method: "POST", form, timeoutMs: 900000 });
   },
   approveSuggestions: (noteIds: string[]) =>
     request<ApproveSuggestionsResponse>("/api/inbox/approve", { method: "POST", body: { noteIds }, timeoutMs: 15000 }),

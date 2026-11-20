@@ -28,7 +28,9 @@ export interface NewOutboxNote {
   markdown?: string;
   url?: string;
   file?: { uri: string; name: string };
-  source?: "app" | "share-intent";
+  source?: "app" | "share-intent" | "import";
+  /** Audio: an external file instead of a recording. */
+  imported?: boolean;
 }
 
 interface OutboxValue {
@@ -157,6 +159,7 @@ export function OutboxProvider({ children }: { children: ReactNode }) {
         kind: note.kind,
         capturedAt: new Date().toISOString(),
         source: note.source ?? "app",
+        ...(note.imported ? { imported: true } : {}),
         target: note.target,
         title: note.title,
         markdown: note.markdown,

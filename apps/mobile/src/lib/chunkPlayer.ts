@@ -14,6 +14,24 @@ import { api, authHeaders } from "./api";
 
 export const RATES = [1, 1.5, 2] as const;
 
+/** Cache file extension by stored mime (recordings are aac; imported files can be m4a, mp3, wav, ogg/opus, flac). */
+function extensionOf(mime: string | undefined): string {
+  switch (mime) {
+    case "audio/mp4":
+      return "m4a";
+    case "audio/mpeg":
+      return "mp3";
+    case "audio/wav":
+      return "wav";
+    case "audio/ogg":
+      return "ogg";
+    case "audio/flac":
+      return "flac";
+    default:
+      return "aac";
+  }
+}
+
 export interface ChunkPlayer {
   /** Pieces downloaded so far / in total, and whether the player can play. */
   prepared: { done: number; total: number; ready: boolean; error: string | null };
@@ -60,7 +78,7 @@ export function useChunkPlayer(noteId: string, chunks: AudioChunk[], title: stri
       try {
         const uris: string[] = [];
         for (const [i, c] of chunks.entries()) {
-          const file = new File(Paths.cache, `audio-${noteId}-${i}.aac`);
+          const file = new File(Paths.cache, `audio-${noteId}-${i}.${extensionOf(c.mime)}`);
           if (!file.exists || file.size !== c.size) await download(c.fileKey!, file);
           if (cancelled) return;
           uris.push(file.uri);

@@ -6,11 +6,14 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { AUDIO_IMPORT_EXTENSIONS, AUDIO_IMPORT_MAX_BYTES } from "@notkocu/shared";
 import { TargetPicker, type PickedTarget } from "../src/components/TargetPicker";
 import type { NewOutboxNote } from "../src/lib/OutboxProvider";
 import { useNow, useTimeZone } from "../src/hooks/useNow";
 import { findAutoTarget, useScheduleNow } from "../src/hooks/useSchedule";
-import { formatDuration } from "../src/lib/format";
+import { useAudioLimitMin } from "../src/hooks/queries";
+import { readAudioFileDuration } from "../src/lib/audioFileInfo";
+import { DAY_SHORT, formatDuration } from "../src/lib/format";
 import { useOutbox } from "../src/lib/OutboxProvider";
 import { useRecording } from "../src/lib/RecordingProvider";
 
@@ -41,6 +44,11 @@ interface PickedFile {
   size?: number;
 }
 
+/** An external audio file waiting to be saved; durationSec: undefined = still reading, null = could not be read. */
+interface ImportedAudio extends PickedFile {
+  durationSec?: number | null;
+}
+
 /** "example.com/x" -> "https://example.com/x"; null when it cannot be a web address. */
 function normalizeUrl(raw: string): string | null {
   const value = raw.trim();
@@ -53,6 +61,12 @@ function normalizeUrl(raw: string): string | null {
     return null;
   }
 }
+
+const AUDIO_PICKER_TYPES = ["audio/*", "application/ogg"];
+const hasExt = (name: string | null | undefined, exts: readonly string[]) => exts.some((x) => (name ?? "").toLowerCase().endsWith("." + x));
+const isAmrFile = (f: { mimeType?: string | null; fileName?: string | null }) => /amr/i.test(f.mimeType ?? "") || hasExt(f.fileName, ["amr"]);
+const isAudioFile = (f: { mimeType?: string | null; fileName?: string | null }) =>
+  (f.mimeType ?? "").startsWith("audio/") || /ogg|opus/i.test(f.mimeType ?? "") || hasExt(f.fileName, AUDIO_IMPORT_EXTENSIONS) || isAmrFile(f);
 
 const DOC_EXTENSIONS = [".pdf", ".docx", ".pptx"];
 const isDocument = (f: { mimeType?: string | null; fileName?: string | null }) =>
@@ -87,21 +101,39 @@ export default function CaptureScreen() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [consent, setConsent] = useState(false); // "Hocadan kayıt izni aldım"
+  // Audio imported from a file (picker or share): its own target (default inbox) and, when the course has
+  // several sessions that week, which one it belongs to. The auto-assignment rule is NOT used for imports.
+  const [imported, setImported] = useState<ImportedAudio | null>(null);
+  const [importTarget, setImportTarget] = useState<PickedTarget | null>(null); // null = inbox
+  const [importSession, setImportSession] = useState<string | null>(null);
+  const audioLimitMin = useAudioLimitMin();
   const recording = rec.status !== "idle"; // a recording is in progress: this sheet is its control panel
 
+  const importMode = type === "audio" && imported !== null && !recording;
+  const importCourse = importMode && importTarget?.courseId ? schedule.courses.find((c) => c._id === importTarget.courseId) : undefined;
+  const importSessions = importCourse ? [...importCourse.sessions].sort((a, b) => a.day - b.day || a.start.localeCompare(b.start)) : [];
+  const sessionMissing = importSessions.length > 1 && !importSession;
   const manualCourse = manual?.courseId ? schedule.courses.find((c) => c._id === manual.courseId) : undefined;
-  const target = manual
-    ? manual.courseId
-      ? { course: manualCourse, weekNo: manual.weekNo ?? schedule.weekNo ?? 1 }
-      : null // inbox chosen by hand
-    : schedule.autoTarget;
+  const target = importMode
+    ? importTarget?.courseId
+      ? { course: importCourse, weekNo: importTarget.weekNo ?? schedule.weekNo ?? 1 }
+      : null // imports go to the inbox unless a lesson is picked
+    : manual
+      ? manual.courseId
+        ? { course: manualCourse, weekNo: manual.weekNo ?? schedule.weekNo ?? 1 }
+        : null // inbox chosen by hand
+      : schedule.autoTarget;
 
   const label = target?.course ? `${target.course.name || target.course.code} · ${target.weekNo}. hafta` : "Gelen kutusu";
-  const caption = manual
-    ? "Elle seçildi"
-    : schedule.autoTarget
-      ? "Şu an derstesin, otomatik seçildi"
-      : "Ders saati dışında, gelen kutusuna gider";
+  const caption = importMode
+    ? importTarget?.courseId
+      ? "Elle seçildi · kayıt o dersin saatine işlenir"
+      : "Gelen kutusuna gider; dersi yazıdan tahmin edilir ya da sen seçersin"
+    : manual
+      ? "Elle seçildi"
+      : schedule.autoTarget
+        ? "Şu an derstesin, otomatik seçildi"
+        : "Ders saati dışında, gelen kutusuna gider";
 
   // Recomputed at save time, not at open time: opened at 08:45, saved at 09:05 -> the course.
   function resolveTarget(): { courseId: string; weekNo: number } | { courseId: null; weekNo?: undefined } {
@@ -166,7 +198,18 @@ export default function CaptureScreen() {
     if (files.length > 0) {
       const images = files.filter((f) => f.mimeType?.startsWith("image/"));
       const docsShared = files.filter(isDocument);
-      if (images.length > 0) {
+      const audios = files.filter(isAudioFile);
+      if (images.length === 0 && docsShared.length === 0 && audios.length > 0) {
+        // A shared voice note (WhatsApp .opus ...): the Ses type in import mode; the user picks the lesson, default inbox.
+        const first = audios[0]!;
+        setType("audio");
+        if (isAmrFile(first)) {
+          setError("AMR biçimi desteklenmiyor. Ses dosyasını m4a, mp3 ya da ogg olarak paylaş.");
+        } else {
+          setImportFile({ uri: first.path, name: first.fileName || "ses", size: first.size ?? undefined });
+          if (audios.length > 1) setError("Bir seferde tek ses dosyası eklenir; ilkini ekledim.");
+        }
+      } else if (images.length > 0) {
         setType("image");
         setPhotos(images.slice(0, MAX_PHOTOS).map(toPicked));
         setError(null);
@@ -176,7 +219,7 @@ export default function CaptureScreen() {
         setDocs(fit.slice(0, MAX_DOCS).map(toPicked));
         setError(fit.length < docsShared.length ? "Dosya en fazla 20 MB olabilir" : null);
       } else {
-        setError("Bu dosya türü desteklenmiyor. Fotoğraf, PDF, DOCX ve PPTX paylaşabilirsin.");
+        setError("Bu dosya türü desteklenmiyor. Fotoğraf, PDF, DOCX, PPTX ve ses paylaşabilirsin.");
       }
     } else if (shareIntent.webUrl) {
       const link = shareIntent.webUrl;
@@ -228,6 +271,31 @@ export default function CaptureScreen() {
     );
   }
 
+  /** Starts an import: the file is kept as is, its length is read in the background. */
+  function setImportFile(file: ImportedAudio) {
+    if ((file.size ?? 0) > AUDIO_IMPORT_MAX_BYTES) {
+      setError("Ses dosyası en fazla 100 MB olabilir");
+      return;
+    }
+    setError(null);
+    setImportSession(null);
+    setImported({ ...file, durationSec: undefined });
+    void readAudioFileDuration(file.uri).then((durationSec) =>
+      setImported((prev) => (prev && prev.uri === file.uri ? { ...prev, durationSec } : prev)),
+    );
+  }
+
+  async function pickAudioFile() {
+    const res = await DocumentPicker.getDocumentAsync({ type: AUDIO_PICKER_TYPES, multiple: false, copyToCacheDirectory: true });
+    if (res.canceled || !res.assets[0]) return;
+    const a = res.assets[0];
+    if (isAmrFile({ mimeType: a.mimeType, fileName: a.name })) {
+      setError("AMR biçimi desteklenmiyor. Ses dosyasını m4a, mp3 ya da ogg olarak ekle.");
+      return;
+    }
+    setImportFile({ uri: a.uri, name: a.name, size: a.size });
+  }
+
   async function pickDocuments() {
     const res = await DocumentPicker.getDocumentAsync({ type: DOC_TYPES, multiple: true, copyToCacheDirectory: true });
     if (res.canceled) return;
@@ -246,7 +314,16 @@ export default function CaptureScreen() {
     const source = fromShare ? ("share-intent" as const) : ("app" as const);
     const notes: NewOutboxNote[] = [];
 
-    if (type === "image" || type === "document") {
+    if (importMode && imported) {
+      const where = importTarget?.courseId
+        ? {
+            courseId: importTarget.courseId,
+            weekNo: importTarget.weekNo ?? schedule.weekNo ?? 1,
+            ...(importSession ? { sessionId: importSession } : {}),
+          }
+        : { courseId: null };
+      notes.push({ kind: "audio", imported: true, target: where, file: { uri: imported.uri, name: imported.name }, source: fromShare ? "share-intent" : "import" });
+    } else if (type === "image" || type === "document") {
       for (const f of type === "image" ? photos : docs) {
         notes.push({ kind: type, target, file: { uri: f.uri, name: f.name }, source });
       }
@@ -275,8 +352,10 @@ export default function CaptureScreen() {
   const busy = saving || rec.status === "starting" || rec.status === "finishing";
   const canSave =
     !busy &&
-    type !== "audio" && // a recording has its own controls
-    (type === "image"
+    (type !== "audio" || importMode) && // a recording has its own controls
+    (importMode
+      ? !sessionMissing
+      : type === "image"
       ? photos.length > 0
       : type === "document"
         ? docs.length > 0
@@ -312,7 +391,7 @@ export default function CaptureScreen() {
             <Text numberOfLines={2} className="font-body-semibold text-lg text-ink">
               {label}
             </Text>
-            <Text className={`font-body text-sm ${!manual && schedule.autoTarget ? "text-green-700" : "text-muted"}`}>{caption}</Text>
+            <Text className={`font-body text-sm ${!importMode && !manual && schedule.autoTarget ? "text-green-700" : "text-muted"}`}>{caption}</Text>
           </View>
           <View className="items-end gap-1">
             <Pressable
@@ -322,7 +401,7 @@ export default function CaptureScreen() {
             >
               <Text className="font-body-semibold text-base text-ink">Değiştir</Text>
             </Pressable>
-            {manual ? (
+            {manual && !importMode ? (
               <Pressable onPress={() => setManual(null)} className="min-h-touch justify-center px-1">
                 <Text className="font-body-medium text-sm text-primary">Otomatik seç</Text>
               </Pressable>
@@ -404,12 +483,95 @@ export default function CaptureScreen() {
                     <Text className="font-body-semibold text-base text-white">Bitir</Text>
                   </Pressable>
                 </View>
+                {rec.elapsedSec > audioLimitMin * 60 ? (
+                  <View className="w-full rounded-xl bg-amber-100 p-3">
+                    <Text className="font-body-semibold text-sm text-amber-900">Bu kayıt otomatik işlenmeyecek</Text>
+                    <Text className="font-body text-sm text-amber-900">
+                      {audioLimitMin} dakikadan uzun kayıtlar yazıya çevrilmez. Kayıt sürer ve dinlenebilir; önemli kısmını kırpıp tekrar yükleyebilirsin.
+                    </Text>
+                  </View>
+                ) : null}
                 <Text className="text-center font-body text-sm text-muted">
                   Ekran kapansa ve uygulama arka planda olsa da kayıt sürer. Bildirimdeki "Kayıt yapılıyor" yazısı bu yüzdendir.
                 </Text>
               </View>
+            ) : importMode && imported ? (
+              <View className="gap-3">
+                <View className="min-h-touch flex-row items-center gap-3 rounded-2xl border border-line bg-card px-4 py-3">
+                  <Ionicons name="musical-notes-outline" size={22} color="#9D174D" />
+                  <View className="flex-1">
+                    <Text numberOfLines={1} className="font-body-medium text-base text-ink">
+                      {imported.name}
+                    </Text>
+                    <Text className="font-body text-sm text-muted">
+                      {[
+                        formatSize(imported.size),
+                        imported.durationSec === undefined ? "süre okunuyor…" : imported.durationSec ? formatDuration(imported.durationSec) : "süre okunamadı",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => {
+                      setImported(null);
+                      setImportSession(null);
+                    }}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Dosyayı çıkar"
+                    hitSlop={8}
+                    className="h-11 w-11 items-center justify-center"
+                  >
+                    <Ionicons name="close" size={20} color="#6B6B66" />
+                  </Pressable>
+                </View>
+                {imported.durationSec && imported.durationSec > audioLimitMin * 60 ? (
+                  <View className="rounded-xl bg-amber-100 p-3">
+                    <Text className="font-body-semibold text-sm text-amber-900">Bu kayıt otomatik işlenmeyecek</Text>
+                    <Text className="font-body text-sm text-amber-900">
+                      Kayıt {audioLimitMin} dakikadan uzun; eklenir ve dinlenebilir ama yazıya çevrilmez. Önemli kısmını kırpıp yüklersen çevrilir.
+                    </Text>
+                  </View>
+                ) : null}
+                {importSessions.length > 1 ? (
+                  <View className="gap-2">
+                    <Text className="font-body-medium text-base text-ink">Hangi oturum?</Text>
+                    <View className="flex-row flex-wrap gap-2">
+                      {importSessions.map((s) => {
+                        const selected = importSession === s._id;
+                        return (
+                          <Pressable
+                            key={s._id}
+                            onPress={() => setImportSession(s._id)}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected }}
+                            className={`min-h-touch justify-center rounded-xl border px-4 ${selected ? "border-primary bg-primary-soft" : "border-line bg-card"}`}
+                          >
+                            <Text className={`font-body-medium text-base ${selected ? "text-primary-dark" : "text-ink"}`}>
+                              {DAY_SHORT[s.day]} {s.start}–{s.end} · {s.kind}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
+                <Text className="font-body text-sm text-muted">
+                  Başkasına ait bir kaydı eklemeden önce kaydeden kişinin ve hocanın bundan haberi olduğundan emin ol. Kayıt arka planda yazıya çevrilir ve bölümlere ayrılır.
+                </Text>
+              </View>
             ) : (
               <>
+                <Pressable
+                  onPress={() => void pickAudioFile()}
+                  disabled={busy}
+                  accessibilityRole="button"
+                  className="min-h-[56px] flex-row items-center justify-center gap-2 rounded-2xl border border-line bg-card active:opacity-80"
+                >
+                  <Ionicons name="folder-open-outline" size={22} color="#18181B" />
+                  <Text className="font-body-semibold text-base text-ink">Dosyadan ekle</Text>
+                </Pressable>
                 <Pressable
                   onPress={() => setConsent((c) => !c)}
                   accessibilityRole="checkbox"
@@ -575,7 +737,7 @@ export default function CaptureScreen() {
         {error ? <Text className="font-body text-sm text-red-700">{error}</Text> : null}
       </ScrollView>
 
-      {type !== "audio" ? (
+      {type !== "audio" || importMode ? (
       <View className="px-5" style={{ paddingBottom: insets.bottom + 16 }}>
         <Pressable
           onPress={save}
@@ -595,10 +757,19 @@ export default function CaptureScreen() {
           courses={schedule.courses}
           weekCount={schedule.semester.weekCount}
           currentWeekNo={schedule.weekNo}
-          value={manual ?? (schedule.autoTarget ? { courseId: schedule.autoTarget.course._id, weekNo: schedule.autoTarget.weekNo } : null)}
+          value={
+            importMode
+              ? importTarget
+              : (manual ?? (schedule.autoTarget ? { courseId: schedule.autoTarget.course._id, weekNo: schedule.autoTarget.weekNo } : null))
+          }
           allowInbox
           onSelect={(t) => {
-            setManual(t);
+            if (importMode) {
+              setImportTarget(t.courseId ? t : null);
+              setImportSession(null);
+            } else {
+              setManual(t);
+            }
             setPicking(false);
           }}
           onClose={() => setPicking(false)}
